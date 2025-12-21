@@ -1,247 +1,434 @@
-import requests
-import pandas as pd
-from datetime import datetime, timedelta
-import os
-from collections import defaultdict
-import time
-import json
+#!/usr/bin/env python3
+"""GitHub Organization Metrics.
+
+A script to fetch and analyze metrics for a GitHub organization,
+providing insights into repository activity, developer contributions,
+and DORA metrics.
+"""
+
+from __future__ import annotations
+
 import argparse
+import json
+import logging
+import os
+import sys
+import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 
-# GitHub API configuration
+import pandas as pd
+import requests
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# Constants
 GITHUB_API_URL = "https://api.github.com"
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-CACHE_FILE = "github_data_cache.json"
-
-headers = {
-    "Authorization": f"Bearer {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github.v3+json",
-}
+CACHE_FILE_SUFFIX = "_github_data_cache.json"
+REQUEST_TIMEOUT = 30  # seconds
+GITHUB_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def make_request(url):
-    while True:
-        try:
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                return response.json()
-            elif (
-                response.status_code == 403
-                and "X-RateLimit-Remaining" in response.headers
-                and int(response.headers["X-RateLimit-Remaining"]) == 0
-            ):
-                reset_time = int(response.headers["X-RateLimit-Reset"])
-                sleep_time = max(
-                    1, reset_time - time.time() + 1
-                )  # Ensure sleep time is at least 1 second
-                print(f"Rate limit exceeded. Sleeping for {sleep_time:.2f} seconds.")
-                time.sleep(sleep_time)
-            elif (
-                response.status_code == 403
-                and "Resource not accessible by personal access token" in response.text
-            ):
-                print(
-                    f"Permission error for {url}: Your token doesn't have access to this resource."
+@dataclass
+class DeveloperMetrics:
+    """Metrics for a single developer."""
+
+    name: str
+    commits: int = 0
+    lines_added: int = 0
+    lines_deleted: int = 0
+    prs_opened: int = 0
+    prs_reviewed: int = 0
+    pr_comments: int = 0
+    repositories: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class RepositoryMetrics:
+    """Metrics for a single repository."""
+
+    name: str
+    created_at: str = ""
+    updated_at: str = ""
+    language: str = "N/A"
+    branch_count: int = 0
+    contributor_count: int = 0
+    activity: int = 0
+    # DORA metrics
+    deployment_count: int = 0
+    deployment_failures: int = 0
+    failure_rate: float = 0.0
+    avg_recovery_time: float = 0.0
+    avg_deployment_duration: float = 0.0
+    deployment_durations_count: int = 0
+    avg_branch_to_merge_time: float = 0.0
+    branch_merges_count: int = 0
+
+
+def parse_github_date(date_str: str) -> datetime:
+    """Parse a GitHub API date string to a timezone-aware datetime.
+
+    Args:
+        date_str: ISO format date string from GitHub API.
+
+    Returns:
+        A timezone-aware datetime object (UTC).
+    """
+    return datetime.strptime(date_str, GITHUB_DATE_FORMAT).replace(tzinfo=timezone.utc)
+
+
+def format_date_for_display(date_str: str) -> str:
+    """Format a GitHub date string for human-readable display.
+
+    Args:
+        date_str: ISO format date string from GitHub API.
+
+    Returns:
+        A formatted date string like 'January 15, 2024'.
+    """
+    return parse_github_date(date_str).strftime("%B %d, %Y")
+
+
+class GitHubAPIClient:
+    """A client for interacting with the GitHub API."""
+
+    def __init__(self, token: str) -> None:
+        """Initialize the GitHub API client.
+
+        Args:
+            token: GitHub Personal Access Token.
+        """
+        self.token = token
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+
+    def _make_request(self, url: str) -> dict[str, Any] | list[Any] | None:
+        """Make a request to the GitHub API with rate limit handling.
+
+        Args:
+            url: The API endpoint URL.
+
+        Returns:
+            The JSON response as a dict/list, or None if the request failed.
+        """
+        while True:
+            try:
+                response = requests.get(
+                    url, headers=self.headers, timeout=REQUEST_TIMEOUT
                 )
+
+                if response.status_code == 200:
+                    return response.json()
+
+                if (
+                    response.status_code == 403
+                    and "X-RateLimit-Remaining" in response.headers
+                    and int(response.headers["X-RateLimit-Remaining"]) == 0
+                ):
+                    reset_time = int(response.headers["X-RateLimit-Reset"])
+                    sleep_time = max(1, reset_time - time.time() + 1)
+                    logger.warning(
+                        "Rate limit exceeded. Sleeping for %.0f seconds.", sleep_time
+                    )
+                    time.sleep(sleep_time)
+                    continue
+
+                if (
+                    response.status_code == 403
+                    and "Resource not accessible" in response.text
+                ):
+                    logger.warning("Permission error for %s: Token lacks access.", url)
+                    return None
+
+                if response.status_code == 404:
+                    logger.debug("Resource not found: %s", url)
+                    return None
+
+                logger.error("Error fetching %s: %d", url, response.status_code)
+                logger.debug("Response: %s", response.text)
                 return None
-            elif response.status_code == 404 and "Not Found" in response.text:
-                print(
-                    f"Resource not found for {url} - this is often normal for deleted branches."
-                )
+
+            except requests.exceptions.RequestException as e:
+                logger.error("Request exception for %s: %s", url, e)
                 return None
-            else:
-                print(f"Error fetching {url}: {response.status_code}")
-                print(f"Response content: {response.text}")
-                return None
-        except requests.exceptions.RequestException as e:
-            print(f"Request exception for {url}: {e}")
-            return None
 
+    def _paginate(
+        self,
+        url: str,
+        params: dict[str, str] | None = None,
+        max_items: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Paginate through GitHub API results.
 
-def get_org_repos(org, since, target_repos=None):
-    repos = []
-    page = 1
+        Args:
+            url: The API endpoint URL (without query params).
+            params: Optional query parameters.
+            max_items: Maximum number of items to fetch (None for all).
 
-    # Keep track of which target repos we've found and which are still missing
-    if target_repos:
-        found_repos = set()
-        missing_repos = set(target_repos)
+        Returns:
+            A list of all items from all pages.
+        """
+        items: list[dict[str, Any]] = []
+        page = 1
+        params = params or {}
 
-    while True:
-        url = f"{GITHUB_API_URL}/orgs/{org}/repos?page={page}&per_page=100&type=all&sort=pushed&direction=desc"
-        print(f"Fetching: {url}")
-        page_repos = make_request(url)
-        if not page_repos:
-            break
+        while True:
+            query_params = {**params, "page": str(page), "per_page": "100"}
+            query_string = "&".join(f"{k}={v}" for k, v in query_params.items())
+            full_url = f"{url}?{query_string}"
 
-        # Filter repositories based on target_repos if provided
+            page_items = self._make_request(full_url)
+            if not page_items or not isinstance(page_items, list):
+                break
+
+            items.extend(page_items)
+
+            if max_items and len(items) >= max_items:
+                return items[:max_items]
+
+            if len(page_items) < 100:
+                break
+
+            page += 1
+
+        return items
+
+    def get_org_repos(
+        self,
+        org: str,
+        since: str,
+        target_repos: list[str] | None = None,
+        max_repos: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Fetch repositories for an organization.
+
+        Args:
+            org: The GitHub organization name.
+            since: ISO format date string to filter repos pushed after this date.
+            target_repos: Optional list of specific repo names to fetch.
+            max_repos: Maximum number of repositories to return if no target specified.
+
+        Returns:
+            A list of repository data dictionaries.
+        """
+        repos: list[dict[str, Any]] = []
+        page = 1
+
         if target_repos:
-            filtered_repos = [
-                repo
-                for repo in page_repos
-                if repo["name"] in target_repos and repo["pushed_at"] >= since
-            ]
-            repos.extend(filtered_repos)
+            found_repos: set[str] = set()
+            missing_repos = set(target_repos)
 
-            # Update our tracking of found/missing repos
-            newly_found = {repo["name"] for repo in filtered_repos}
-            found_repos.update(newly_found)
-            missing_repos -= newly_found
+        while True:
+            url = f"{GITHUB_API_URL}/orgs/{org}/repos"
+            params = {
+                "type": "all",
+                "sort": "pushed",
+                "direction": "desc",
+                "page": str(page),
+                "per_page": "100",
+            }
+            query_string = "&".join(f"{k}={v}" for k, v in params.items())
+            full_url = f"{url}?{query_string}"
 
-            print(
-                f"Retrieved {len(filtered_repos)} specified repositories updated since {since}"
-            )
+            logger.info("Fetching repositories: page %d", page)
+            page_repos = self._make_request(full_url)
 
-            # If we found all target repos or no more repos to check, exit
-            if len(missing_repos) == 0 or len(page_repos) < 100:
-                break
-        else:
-            # Original behavior: get top repos sorted by pushed_at
-            repos.extend([repo for repo in page_repos if repo["pushed_at"] >= since])
-            print(f"Retrieved {len(repos)} repositories updated since {since}")
-            if len(page_repos) < 100 or len(repos) >= 20:
+            if not page_repos:
                 break
 
-        page += 1
+            if target_repos:
+                filtered = [
+                    r
+                    for r in page_repos
+                    if r["name"] in target_repos and r["pushed_at"] >= since
+                ]
+                repos.extend(filtered)
 
-    # Warn about any requested repos that weren't found
-    if target_repos and missing_repos:
-        print(
-            f"WARNING: The following requested repositories were not found: {', '.join(missing_repos)}"
+                newly_found = {r["name"] for r in filtered}
+                found_repos.update(newly_found)
+                missing_repos -= newly_found
+
+                logger.info("Found %d target repositories", len(filtered))
+
+                if not missing_repos or len(page_repos) < 100:
+                    break
+            else:
+                filtered = [r for r in page_repos if r["pushed_at"] >= since]
+                repos.extend(filtered)
+                logger.info("Retrieved %d repositories", len(repos))
+
+                if len(page_repos) < 100 or len(repos) >= max_repos:
+                    break
+
+            page += 1
+
+        if target_repos and missing_repos:
+            logger.warning("Repositories not found: %s", ", ".join(missing_repos))
+
+        if not target_repos:
+            repos = repos[:max_repos]
+
+        logger.info("Total repositories to analyze: %d", len(repos))
+        return repos
+
+    def get_commits(self, org: str, repo: str, since: str) -> list[dict[str, Any]]:
+        """Fetch commits for a repository.
+
+        Args:
+            org: The GitHub organization name.
+            repo: The repository name.
+            since: ISO format date string.
+
+        Returns:
+            A list of commit data dictionaries.
+        """
+        commits = self._paginate(
+            f"{GITHUB_API_URL}/repos/{org}/{repo}/commits", {"since": since}
         )
+        logger.info("Commits for %s: %d", repo, len(commits))
+        return commits
 
-    # If no target repos specified, limit to 20 as in original code
-    if not target_repos:
-        return repos[:20]
-    return repos
+    def get_commit_stats(self, org: str, repo: str, sha: str) -> dict[str, int] | None:
+        """Fetch stats for a specific commit.
 
+        Args:
+            org: The GitHub organization name.
+            repo: The repository name.
+            sha: The commit SHA.
 
-def get_commits(org, repo, since):
-    commits = []
-    page = 1
-    while True:
-        url = f"{GITHUB_API_URL}/repos/{org}/{repo}/commits?since={since}&page={page}&per_page=100"
-        page_commits = make_request(url)
-        if not page_commits:
-            break
-        commits.extend(page_commits)
-        if len(page_commits) < 100:
-            break
-        page += 1
-    print(f"Total commits for {repo}: {len(commits)}")
-    return commits
+        Returns:
+            A dict with 'additions' and 'deletions', or None.
+        """
+        url = f"{GITHUB_API_URL}/repos/{org}/{repo}/commits/{sha}"
+        data = self._make_request(url)
+        if data and isinstance(data, dict) and "stats" in data:
+            return data["stats"]
+        return None
 
+    def get_branches(self, org: str, repo: str) -> list[dict[str, Any]]:
+        """Fetch branches for a repository."""
+        result = self._make_request(f"{GITHUB_API_URL}/repos/{org}/{repo}/branches")
+        return result if isinstance(result, list) else []
 
-def get_commit_stats(org, repo, sha):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/commits/{sha}"
-    commit_data = make_request(url)
-    if commit_data and "stats" in commit_data:
-        return commit_data["stats"]
-    return None
+    def get_contributors(self, org: str, repo: str) -> list[dict[str, Any]]:
+        """Fetch contributors for a repository."""
+        result = self._make_request(f"{GITHUB_API_URL}/repos/{org}/{repo}/contributors")
+        return result if isinstance(result, list) else []
 
+    def get_pull_requests(
+        self, org: str, repo: str, state: str = "all"
+    ) -> list[dict[str, Any]]:
+        """Fetch pull requests for a repository."""
+        prs = self._paginate(
+            f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls", {"state": state}
+        )
+        logger.info("Pull requests for %s: %d", repo, len(prs))
+        return prs
 
-def get_branches(org, repo):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/branches"
-    return make_request(url)
+    def get_pull_request_reviews(
+        self, org: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """Fetch reviews for a pull request."""
+        result = self._make_request(
+            f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls/{pr_number}/reviews"
+        )
+        return result if isinstance(result, list) else []
 
+    def get_pull_request_comments(
+        self, org: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """Fetch comments for a pull request."""
+        result = self._make_request(
+            f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls/{pr_number}/comments"
+        )
+        return result if isinstance(result, list) else []
 
-def get_contributors(org, repo):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/contributors"
-    return make_request(url)
-
-
-def get_pull_requests(org, repo, state="all"):
-    pull_requests = []
-    page = 1
-    while True:
-        url = f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls?state={state}&page={page}&per_page=100"
-        page_prs = make_request(url)
-        if not page_prs:
-            break
-        pull_requests.extend(page_prs)
-        if len(page_prs) < 100:
-            break
-        page += 1
-    print(f"Total pull requests for {repo}: {len(pull_requests)}")
-    return pull_requests
-
-
-def get_pull_request_reviews(org, repo, pr_number):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls/{pr_number}/reviews"
-    return make_request(url)
-
-
-def get_pull_request_comments(org, repo, pr_number):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls/{pr_number}/comments"
-    return make_request(url)
-
-
-def get_branch_commits(org, repo, branch):
-    try:
+    def get_branch_commits(
+        self, org: str, repo: str, branch: str
+    ) -> dict[str, Any] | None:
+        """Get the oldest commit for a branch (to estimate branch creation time)."""
         url = f"{GITHUB_API_URL}/repos/{org}/{repo}/commits?sha={branch}&per_page=100"
-        commits = make_request(url)
-        if commits and len(commits) > 0:
-            # Return the oldest commit (last in the list if sorted newest first)
-            return commits[-1]
-        return None
-    except Exception as e:
-        print(f"Error getting commits for {repo}/{branch}: {e}")
+        commits = self._make_request(url)
+        if commits and isinstance(commits, list) and len(commits) > 0:
+            return commits[-1]  # Oldest commit (API returns newest first)
         return None
 
+    def get_workflow_runs(self, org: str, repo: str) -> dict[str, Any] | None:
+        """Fetch workflow runs for a repository."""
+        url = f"{GITHUB_API_URL}/repos/{org}/{repo}/actions/runs?per_page=100"
+        return self._make_request(url)
 
-def get_workflow_runs(org, repo):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/actions/runs?per_page=100"
-    return make_request(url)
+    def get_workflow_run_details(
+        self, org: str, repo: str, run_id: int
+    ) -> dict[str, Any] | None:
+        """Fetch details for a specific workflow run."""
+        url = f"{GITHUB_API_URL}/repos/{org}/{repo}/actions/runs/{run_id}"
+        return self._make_request(url)
 
+    def get_deployments(self, org: str, repo: str) -> list[dict[str, Any]]:
+        """Fetch deployments for a repository."""
+        result = self._make_request(
+            f"{GITHUB_API_URL}/repos/{org}/{repo}/deployments?per_page=100"
+        )
+        return result if isinstance(result, list) else []
 
-def get_workflow_run_details(org, repo, run_id):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/actions/runs/{run_id}"
-    return make_request(url)
+    def get_releases(self, org: str, repo: str) -> list[dict[str, Any]]:
+        """Fetch releases for a repository."""
+        result = self._make_request(
+            f"{GITHUB_API_URL}/repos/{org}/{repo}/releases?per_page=100"
+        )
+        return result if isinstance(result, list) else []
 
+    def get_tags(self, org: str, repo: str) -> list[dict[str, Any]]:
+        """Fetch tags for a repository."""
+        result = self._make_request(
+            f"{GITHUB_API_URL}/repos/{org}/{repo}/tags?per_page=100"
+        )
+        return result if isinstance(result, list) else []
 
-def get_workflow_by_name(org, repo, workflow_name):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/actions/workflows/{workflow_name}.yml"
-    workflow = make_request(url)
-    if not workflow:
-        url = f"{GITHUB_API_URL}/repos/{org}/{repo}/actions/workflows/{workflow_name}.yaml"
-        workflow = make_request(url)
-    return workflow
-
-
-def get_deployments(org, repo):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/deployments?per_page=100"
-    return make_request(url)
-
-
-def get_releases(org, repo):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/releases?per_page=100"
-    return make_request(url)
-
-
-def get_tags(org, repo):
-    url = f"{GITHUB_API_URL}/repos/{org}/{repo}/tags?per_page=100"
-    return make_request(url)
-
-
-def get_issues(org, repo, state="all"):
-    issues = []
-    page = 1
-    while True:
-        url = f"{GITHUB_API_URL}/repos/{org}/{repo}/issues?state={state}&page={page}&per_page=100"
-        page_issues = make_request(url)
-        if not page_issues:
-            break
-        # Filter out pull requests, which are also returned by the issues endpoint
-        issues.extend([issue for issue in page_issues if "pull_request" not in issue])
-        if len(page_issues) < 100:
-            break
-        page += 1
-    print(f"Total issues for {repo}: {len(issues)}")
-    return issues
+    def get_issues(
+        self, org: str, repo: str, state: str = "all"
+    ) -> list[dict[str, Any]]:
+        """Fetch issues for a repository (excluding PRs)."""
+        all_issues = self._paginate(
+            f"{GITHUB_API_URL}/repos/{org}/{repo}/issues", {"state": state}
+        )
+        # Filter out pull requests
+        issues = [i for i in all_issues if "pull_request" not in i]
+        logger.info("Issues for %s: %d", repo, len(issues))
+        return issues
 
 
-def fetch_data(org, since, target_repos=None):
-    data = {
-        "repos": get_org_repos(org, since, target_repos),
+def fetch_data(
+    client: GitHubAPIClient,
+    org: str,
+    since: str,
+    target_repos: list[str] | None = None,
+) -> dict[str, Any]:
+    """Fetch all metrics data for an organization.
+
+    Args:
+        client: The GitHub API client.
+        org: The GitHub organization name.
+        since: ISO format date string.
+        target_repos: Optional list of specific repos to analyze.
+
+    Returns:
+        A dictionary containing all fetched data.
+    """
+    data: dict[str, Any] = {
+        "repos": client.get_org_repos(org, since, target_repos),
         "commits": {},
         "commit_stats": {},
         "branches": {},
@@ -249,10 +436,9 @@ def fetch_data(org, since, target_repos=None):
         "pull_requests": {},
         "pr_reviews": {},
         "pr_comments": {},
-        "branch_first_commits": {},  # Store first commit for each branch
-        # Additional DORA-related data
+        "branch_first_commits": {},
         "workflow_runs": {},
-        "workflow_run_details": {},  # Store details for each workflow run
+        "workflow_run_details": {},
         "deployments": {},
         "releases": {},
         "tags": {},
@@ -261,128 +447,77 @@ def fetch_data(org, since, target_repos=None):
 
     for repo in data["repos"]:
         repo_name = repo["name"]
-        print(f"Fetching detailed data for {repo_name}")
-        data["commits"][repo_name] = get_commits(org, repo_name, since)
+        logger.info("Fetching data for %s", repo_name)
+
+        # Core data
+        data["commits"][repo_name] = client.get_commits(org, repo_name, since)
         data["commit_stats"][repo_name] = {}
         for commit in data["commits"][repo_name]:
-            data["commit_stats"][repo_name][commit["sha"]] = get_commit_stats(
+            data["commit_stats"][repo_name][commit["sha"]] = client.get_commit_stats(
                 org, repo_name, commit["sha"]
             )
-        data["branches"][repo_name] = get_branches(org, repo_name)
-        data["contributors"][repo_name] = get_contributors(org, repo_name)
-        data["pull_requests"][repo_name] = get_pull_requests(org, repo_name)
+
+        data["branches"][repo_name] = client.get_branches(org, repo_name)
+        data["contributors"][repo_name] = client.get_contributors(org, repo_name)
+        data["pull_requests"][repo_name] = client.get_pull_requests(org, repo_name)
+
+        # DORA-related data
+        logger.info("Fetching DORA data for %s", repo_name)
+
+        workflow_runs = client.get_workflow_runs(org, repo_name)
+        data["workflow_runs"][repo_name] = workflow_runs
+
+        if workflow_runs and "workflow_runs" in workflow_runs:
+            data["workflow_run_details"][repo_name] = {}
+            for run in workflow_runs["workflow_runs"]:
+                if run.get("status") == "completed":
+                    run_id = run["id"]
+                    data["workflow_run_details"][repo_name][run_id] = (
+                        client.get_workflow_run_details(org, repo_name, run_id)
+                    )
+            logger.debug(
+                "Workflow runs for %s: %d",
+                repo_name,
+                len(workflow_runs.get("workflow_runs", [])),
+            )
+        else:
+            data["workflow_run_details"][repo_name] = {}
+
+        data["deployments"][repo_name] = client.get_deployments(org, repo_name)
+        data["releases"][repo_name] = client.get_releases(org, repo_name)
+        data["tags"][repo_name] = client.get_tags(org, repo_name)
+        data["issues"][repo_name] = client.get_issues(org, repo_name)
+
+        # PR reviews, comments, and branch data
         data["pr_reviews"][repo_name] = {}
         data["pr_comments"][repo_name] = {}
         data["branch_first_commits"][repo_name] = {}
 
-        # Collect additional DORA-related data
-        print(f"Fetching DORA-related data for {repo_name}")
-        try:
-            data["workflow_runs"][repo_name] = get_workflow_runs(org, repo_name)
-
-            # Get detailed info for each workflow run
-            if (
-                data["workflow_runs"][repo_name]
-                and "workflow_runs" in data["workflow_runs"][repo_name]
-            ):
-                data["workflow_run_details"][repo_name] = {}
-
-                for run in data["workflow_runs"][repo_name]["workflow_runs"]:
-                    # Only fetch details for completed runs
-                    if run["status"] == "completed":
-                        run_id = run["id"]
-                        data["workflow_run_details"][repo_name][run_id] = (
-                            get_workflow_run_details(org, repo_name, run_id)
-                        )
-
-            print(
-                f"  - Fetched {len(data['workflow_runs'][repo_name].get('workflow_runs', []) or [])} workflow runs"
-            )
-        except Exception as e:
-            print(f"  - Error fetching workflow runs: {e}")
-            data["workflow_runs"][repo_name] = []
-            data["workflow_run_details"][repo_name] = {}
-
-        try:
-            data["deployments"][repo_name] = get_deployments(org, repo_name)
-            print(
-                f"  - Fetched {len(data['deployments'][repo_name] or [])} deployments"
-            )
-        except Exception as e:
-            print(f"  - Error fetching deployments: {e}")
-            data["deployments"][repo_name] = []
-
-        try:
-            data["releases"][repo_name] = get_releases(org, repo_name)
-            print(f"  - Fetched {len(data['releases'][repo_name] or [])} releases")
-        except Exception as e:
-            print(f"  - Error fetching releases: {e}")
-            data["releases"][repo_name] = []
-
-        try:
-            data["tags"][repo_name] = get_tags(org, repo_name)
-            print(f"  - Fetched {len(data['tags'][repo_name] or [])} tags")
-        except Exception as e:
-            print(f"  - Error fetching tags: {e}")
-            data["tags"][repo_name] = []
-
-        try:
-            data["issues"][repo_name] = get_issues(org, repo_name)
-            print(f"  - Fetched {len(data['issues'][repo_name] or [])} issues")
-        except Exception as e:
-            print(f"  - Error fetching issues: {e}")
-            data["issues"][repo_name] = []
-
-        # Process PR data to get branch information
-        processed_prs = 0
         total_prs = len(data["pull_requests"][repo_name])
-        print(f"Processing {total_prs} PRs for {repo_name}...")
+        logger.info("Processing %d PRs for %s", total_prs, repo_name)
 
-        # Count open PRs (branches that still exist)
-        open_prs_count = sum(
-            1 for pr in data["pull_requests"][repo_name] if pr.get("state") == "open"
-        )
-        print(f"  - Found {open_prs_count} open PRs with existing branches")
-
-        for pr in data["pull_requests"][repo_name]:
+        for idx, pr in enumerate(data["pull_requests"][repo_name]):
             pr_number = pr["number"]
-            processed_prs += 1
-            if processed_prs % 10 == 0:
-                print(f"  - Processed {processed_prs}/{total_prs} PRs")
 
-            data["pr_reviews"][repo_name][pr_number] = get_pull_request_reviews(
+            if (idx + 1) % 20 == 0:
+                logger.debug("Processed %d/%d PRs", idx + 1, total_prs)
+
+            data["pr_reviews"][repo_name][pr_number] = client.get_pull_request_reviews(
                 org, repo_name, pr_number
             )
-            data["pr_comments"][repo_name][pr_number] = get_pull_request_comments(
-                org, repo_name, pr_number
+            data["pr_comments"][repo_name][pr_number] = (
+                client.get_pull_request_comments(org, repo_name, pr_number)
             )
 
-            # Only look for branch commits for open PRs - merged PR branches are deleted
-            if pr.get("state") == "open" and "head" in pr and "ref" in pr["head"]:
+            # Get branch first commit for open PRs
+            if pr.get("state") == "open" and pr.get("head", {}).get("ref"):
                 branch_name = pr["head"]["ref"]
-                try:
-                    data["branch_first_commits"][repo_name][branch_name] = (
-                        get_branch_commits(org, repo_name, branch_name)
-                    )
-                    if data["branch_first_commits"][repo_name][branch_name]:
-                        if processed_prs % 10 == 0:
-                            print(
-                                f"    Found first commit for {repo_name}/{branch_name}"
-                            )
-                except Exception:
-                    data["branch_first_commits"][repo_name][branch_name] = None
-            # For merged PRs, we won't try to fetch branch commits since branches are deleted
-            elif (
-                pr.get("state") == "closed"
-                and pr.get("merged_at")
-                and "head" in pr
-                and "ref" in pr["head"]
-            ):
-                # If the branch was merged, we'll estimate branch start from PR creation time
-                # or if available, the first commit timestamp in the PR
+                data["branch_first_commits"][repo_name][branch_name] = (
+                    client.get_branch_commits(org, repo_name, branch_name)
+                )
+            # For merged PRs, use PR creation date as fallback
+            elif pr.get("merged_at") and pr.get("head", {}).get("ref"):
                 branch_name = pr["head"]["ref"]
-
-                # Initialize with a placeholder - we'll use PR creation date as fallback
                 data["branch_first_commits"][repo_name][branch_name] = {
                     "commit": {"committer": {"date": pr["created_at"]}}
                 }
@@ -390,736 +525,496 @@ def fetch_data(org, since, target_repos=None):
     return data
 
 
-def analyze_data(data, since):
-    commit_counts = defaultdict(int)
-    lines_added = defaultdict(int)
-    lines_deleted = defaultdict(int)
-    repos_worked_on = defaultdict(lambda: defaultdict(int))
-    repo_activity = defaultdict(int)
-    repo_details = []
+def _detect_ci_workflow(workflow_runs: dict[str, Any]) -> str | None:
+    """Detect the primary CI/CD workflow for a repository.
 
-    pr_counts = defaultdict(int)
-    pr_reviews = defaultdict(int)
-    pr_comments = defaultdict(int)
-    pr_merge_times = []  # PR creation to merge
-    branch_to_merge_times = []  # Branch creation/first commit to merge
-    repo_branch_to_merge_times = defaultdict(
-        list
-    )  # Track branch-to-merge times per repository
+    Args:
+        workflow_runs: The workflow runs data from GitHub API.
 
-    # DORA metrics data structures
-    repo_deployment_counts = defaultdict(int)
-    repo_deployment_failures = defaultdict(int)
-    repo_deployment_recovery_times = defaultdict(list)
+    Returns:
+        The detected workflow name (lowercase), or None.
+    """
+    if not workflow_runs or "workflow_runs" not in workflow_runs:
+        return None
 
-    # GitHub Actions deployment metrics
-    repo_deployment_durations = defaultdict(
-        list
-    )  # Track deployment durations per repository
+    runs = workflow_runs["workflow_runs"]
+    if not runs:
+        return None
 
-    # Debug counters
-    total_prs_processed = 0
-    total_reviews_found = 0
-    total_comments_found = 0
+    workflow_names = [run["name"].lower() for run in runs if run.get("name")]
 
-    # Get the list of repositories we're analyzing
+    # Prefer CI/CD-related workflows
+    ci_keywords = ("ci", "test", "build", "deploy")
+    ci_workflows = [
+        name for name in workflow_names if any(kw in name for kw in ci_keywords)
+    ]
+
+    if ci_workflows:
+        counter = Counter(ci_workflows)
+        return counter.most_common(1)[0][0]
+
+    if workflow_names:
+        counter = Counter(workflow_names)
+        return counter.most_common(1)[0][0]
+
+    return None
+
+
+def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Analyze the fetched GitHub data.
+
+    Args:
+        data: The data dictionary from fetch_data().
+        since: ISO format date string for filtering.
+
+    Returns:
+        A tuple of (developer_metrics_df, repository_metrics_df).
+    """
+    # Developer metrics
+    developers: dict[str, DeveloperMetrics] = {}
+
+    # Repository metrics
+    repo_metrics: list[RepositoryMetrics] = []
+    repo_activity: dict[str, int] = defaultdict(int)
+
+    # PR merge time tracking
+    pr_merge_times: list[float] = []
+    branch_to_merge_times: list[float] = []
+    repo_branch_to_merge_times: dict[str, list[float]] = defaultdict(list)
+
+    # DORA metrics
+    repo_deployment_counts: dict[str, int] = defaultdict(int)
+    repo_deployment_failures: dict[str, int] = defaultdict(int)
+    repo_deployment_durations: dict[str, list[float]] = defaultdict(list)
+    repo_deployment_recovery_times: dict[str, list[float]] = defaultdict(list)
+
     repo_names = [repo["name"] for repo in data["repos"]]
 
-    # Process GitHub Actions workflow runs
-    # Instead of hardcoding repository names, detect workflows in all repositories we're analyzing
-    specific_workflows = {}
-
-    # Try to detect CI/CD workflows in each repo
+    # Detect CI workflows for each repo
+    specific_workflows: dict[str, str] = {}
     for repo_name in repo_names:
-        if repo_name in data["workflow_runs"]:
-            workflows = data["workflow_runs"][repo_name]
-            if (
-                workflows
-                and "workflow_runs" in workflows
-                and len(workflows["workflow_runs"]) > 0
-            ):
-                # Find the most common workflow name in this repo
-                workflow_names = [
-                    run["name"].lower()
-                    for run in workflows["workflow_runs"]
-                    if "name" in run and run["name"]
-                ]
+        if repo_name in data.get("workflow_runs", {}):
+            workflow_name = _detect_ci_workflow(data["workflow_runs"][repo_name])
+            if workflow_name:
+                specific_workflows[repo_name] = workflow_name
+                logger.debug("Detected workflow '%s' for %s", workflow_name, repo_name)
 
-                # Look for CI/CD related workflow names
-                ci_workflows = [
-                    name
-                    for name in workflow_names
-                    if "ci" in name
-                    or "test" in name
-                    or "build" in name
-                    or "deploy" in name
-                ]
+    # Pre-count PR reviews and comments
+    def get_developer(name: str) -> DeveloperMetrics:
+        if name not in developers:
+            developers[name] = DeveloperMetrics(name=name)
+        return developers[name]
 
-                if ci_workflows:
-                    # Count occurrences of each CI workflow name
-                    from collections import Counter
-
-                    workflow_counter = Counter(ci_workflows)
-                    # Get the most common CI workflow name
-                    most_common = workflow_counter.most_common(1)
-                    if most_common:
-                        specific_workflows[repo_name] = most_common[0][0]
-                        print(
-                            f"Detected workflow '{most_common[0][0]}' for {repo_name}"
-                        )
-                else:
-                    # If no CI/CD specific workflows found, use the most common workflow
-                    if workflow_names:
-                        from collections import Counter
-
-                        workflow_counter = Counter(workflow_names)
-                        most_common = workflow_counter.most_common(1)
-                        if most_common:
-                            specific_workflows[repo_name] = most_common[0][0]
-                            print(
-                                f"No CI/CD workflow found, using most common workflow '{most_common[0][0]}' for {repo_name}"
-                            )
-
-    # Fix: Pre-count all PR reviews and comments by user
-    for repo_name in data["pr_reviews"]:
-        # Skip repositories not in our analysis set
+    # Count PR reviews
+    for repo_name in data.get("pr_reviews", {}):
         if repo_name not in repo_names:
             continue
+        for pr_number, reviews in data["pr_reviews"][repo_name].items():
+            for review in reviews or []:
+                if (
+                    review
+                    and review.get("user", {}).get("login")
+                    and review.get("submitted_at")
+                ):
+                    review_date = parse_github_date(review["submitted_at"])
+                    since_date = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                    if review_date >= since_date:
+                        dev = get_developer(review["user"]["login"])
+                        dev.prs_reviewed += 1
 
-        for pr_number in data["pr_reviews"][repo_name]:
-            pr_reviews_list = data["pr_reviews"][repo_name].get(pr_number, []) or []
-            for review in pr_reviews_list:
-                if review and review.get("user") and "login" in review["user"]:
-                    # Filter reviews by date
-                    if "submitted_at" in review:
-                        review_date = datetime.strptime(
-                            review["submitted_at"], "%Y-%m-%dT%H:%M:%SZ"
-                        ).isoformat()
-                        if review_date >= since:
-                            reviewer = review["user"]["login"]
-                            pr_reviews[reviewer] += 1
-                            total_reviews_found += 1
-
-    for repo_name in data["pr_comments"]:
-        # Skip repositories not in our analysis set
+    # Count PR comments
+    for repo_name in data.get("pr_comments", {}):
         if repo_name not in repo_names:
             continue
-
-        for pr_number in data["pr_comments"][repo_name]:
-            pr_comments_list = data["pr_comments"][repo_name].get(pr_number, []) or []
-            for comment in pr_comments_list:
-                if comment and comment.get("user") and "login" in comment["user"]:
-                    # Filter comments by date
-                    if "created_at" in comment:
-                        comment_date = datetime.strptime(
-                            comment["created_at"], "%Y-%m-%dT%H:%M:%SZ"
-                        ).isoformat()
-                        if comment_date >= since:
-                            commenter = comment["user"]["login"]
-                            pr_comments[commenter] += 1
-                            total_comments_found += 1
+        for pr_number, comments in data["pr_comments"][repo_name].items():
+            for comment in comments or []:
+                if (
+                    comment
+                    and comment.get("user", {}).get("login")
+                    and comment.get("created_at")
+                ):
+                    comment_date = parse_github_date(comment["created_at"])
+                    since_date = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                    if comment_date >= since_date:
+                        dev = get_developer(comment["user"]["login"])
+                        dev.pr_comments += 1
 
     # Process workflow data for DORA metrics
     for repo_name in repo_names:
-        # Process workflows to calculate deployment stats
-        if repo_name in specific_workflows and repo_name in data["workflow_runs"]:
-            target_workflow_name = specific_workflows[repo_name]
-            deployment_count = 0
-            failure_count = 0
+        if repo_name not in specific_workflows or repo_name not in data.get(
+            "workflow_runs", {}
+        ):
+            continue
 
-            if "workflow_runs" in data["workflow_runs"][repo_name]:
-                for run in data["workflow_runs"][repo_name]["workflow_runs"]:
-                    if (
-                        "created_at" in run
-                        and "name" in run
-                        and run["name"].lower() == target_workflow_name
-                    ):
-                        # Only consider runs created after our since date
-                        run_created_at = datetime.strptime(
-                            run["created_at"], "%Y-%m-%dT%H:%M:%SZ"
-                        ).isoformat()
-                        if run_created_at >= since:
-                            # Count this as a deployment attempt regardless of success/failure
-                            deployment_count += 1
+        target_workflow = specific_workflows[repo_name]
+        workflow_data = data["workflow_runs"][repo_name]
 
-                            if run["conclusion"] == "success":
-                                # Calculate deployment duration for successful runs
-                                if "created_at" in run and "updated_at" in run:
-                                    created_at = datetime.strptime(
-                                        run["created_at"], "%Y-%m-%dT%H:%M:%SZ"
-                                    )
-                                    completed_at = datetime.strptime(
-                                        run["updated_at"], "%Y-%m-%dT%H:%M:%SZ"
-                                    )
-                                    duration_minutes = (
-                                        completed_at - created_at
-                                    ).total_seconds() / 60
-                                    repo_deployment_durations[repo_name].append(
-                                        duration_minutes
-                                    )
-                            elif run["conclusion"] == "failure":
-                                # Count failures (already counted in deployment_count)
-                                failure_count += 1
+        if "workflow_runs" not in workflow_data:
+            continue
 
-            repo_deployment_counts[repo_name] = deployment_count
-            repo_deployment_failures[repo_name] = failure_count
+        since_date = datetime.fromisoformat(since.replace("Z", "+00:00"))
 
-    print(
-        f"DEBUG: Pre-counted {total_reviews_found} reviews ({len(pr_reviews)} reviewers)"
-    )
-    print(
-        f"DEBUG: Pre-counted {total_comments_found} comments ({len(pr_comments)} commenters)"
-    )
+        for run in workflow_data["workflow_runs"]:
+            if run.get("name", "").lower() != target_workflow:
+                continue
 
+            run_date = parse_github_date(run.get("created_at", ""))
+            if run_date < since_date:
+                continue
+
+            repo_deployment_counts[repo_name] += 1
+
+            if run.get("conclusion") == "success":
+                if run.get("created_at") and run.get("updated_at"):
+                    created = parse_github_date(run["created_at"])
+                    updated = parse_github_date(run["updated_at"])
+                    duration_minutes = (updated - created).total_seconds() / 60
+                    repo_deployment_durations[repo_name].append(duration_minutes)
+            elif run.get("conclusion") == "failure":
+                repo_deployment_failures[repo_name] += 1
+
+    # Process each repository
     for repo in data["repos"]:
         repo_name = repo["name"]
-        repo_detail = {
-            "name": repo_name,
-            "created_at": datetime.strptime(
-                repo["created_at"], "%Y-%m-%dT%H:%M:%SZ"
-            ).strftime("%B %d, %Y"),
-            "updated_at": datetime.strptime(
-                repo["updated_at"], "%Y-%m-%dT%H:%M:%SZ"
-            ).strftime("%B %d, %Y"),
-            "language": repo["language"] or "N/A",
-            "branch_count": len(data["branches"][repo_name]),
-            "contributor_count": len(data["contributors"][repo_name]),
-            # DORA metrics
-            "deployment_count": repo_deployment_counts.get(repo_name, 0),
-            "deployment_failures": repo_deployment_failures.get(repo_name, 0),
-            "avg_recovery_time": (
-                sum(repo_deployment_recovery_times.get(repo_name, [0]))
-                / len(repo_deployment_recovery_times.get(repo_name, [0]))
-            )
-            if repo_deployment_recovery_times.get(repo_name)
-            else 0,
-            # GitHub Actions metrics
-            "avg_deployment_duration": (
-                sum(repo_deployment_durations.get(repo_name, [0]))
-                / len(repo_deployment_durations.get(repo_name, [0]))
-            )
-            if repo_deployment_durations.get(repo_name)
-            else 0,
-            "deployment_durations_count": len(
-                repo_deployment_durations.get(repo_name, [])
-            ),
-        }
 
-        # Calculate deployment failure rate
-        if repo_detail["deployment_count"] > 0:
-            repo_detail["failure_rate"] = (
-                repo_detail["deployment_failures"] / repo_detail["deployment_count"]
+        # Build repository metrics
+        branches = data.get("branches", {}).get(repo_name, []) or []
+        contributors = data.get("contributors", {}).get(repo_name, []) or []
+        durations = repo_deployment_durations.get(repo_name, [])
+        recovery_times = repo_deployment_recovery_times.get(repo_name, [])
+
+        metrics = RepositoryMetrics(
+            name=repo_name,
+            created_at=format_date_for_display(repo["created_at"]),
+            updated_at=format_date_for_display(repo["updated_at"]),
+            language=repo.get("language") or "N/A",
+            branch_count=len(branches) if isinstance(branches, list) else 0,
+            contributor_count=len(contributors)
+            if isinstance(contributors, list)
+            else 0,
+            deployment_count=repo_deployment_counts.get(repo_name, 0),
+            deployment_failures=repo_deployment_failures.get(repo_name, 0),
+            avg_deployment_duration=sum(durations) / len(durations) if durations else 0,
+            deployment_durations_count=len(durations),
+            avg_recovery_time=sum(recovery_times) / len(recovery_times)
+            if recovery_times
+            else 0,
+        )
+
+        if metrics.deployment_count > 0:
+            metrics.failure_rate = (
+                metrics.deployment_failures / metrics.deployment_count
             ) * 100
-        else:
-            repo_detail["failure_rate"] = 0
 
-        repo_details.append(repo_detail)
-
-        for commit in data["commits"][repo_name]:
-            if commit["commit"]["author"]["date"] >= since:
-                if commit["author"] and "login" in commit["author"]:
-                    author = commit["author"]["login"]
-                    commit_counts[author] += 1
-                    repos_worked_on[author][repo_name] += 1
+        # Process commits
+        for commit in data.get("commits", {}).get(repo_name, []):
+            commit_date = commit.get("commit", {}).get("author", {}).get("date", "")
+            if commit_date >= since:
+                author_data = commit.get("author") or {}
+                if author_data.get("login"):
+                    author = author_data["login"]
+                    dev = get_developer(author)
+                    dev.commits += 1
+                    dev.repositories[repo_name] = dev.repositories.get(repo_name, 0) + 1
                     repo_activity[repo_name] += 1
 
-                    stats = data["commit_stats"][repo_name].get(commit["sha"])
+                    stats = (
+                        data.get("commit_stats", {})
+                        .get(repo_name, {})
+                        .get(commit["sha"])
+                    )
                     if stats:
-                        lines_added[author] += stats["additions"]
-                        lines_deleted[author] += stats["deletions"]
+                        dev.lines_added += stats.get("additions", 0)
+                        dev.lines_deleted += stats.get("deletions", 0)
 
-        pr_merge_times_for_repo = []
-        branch_to_merge_times_for_repo = []
+        # Process PRs for merge time tracking
+        branch_merge_times_for_repo: list[float] = []
+        since_date = datetime.fromisoformat(since.replace("Z", "+00:00"))
 
-        for pr in data["pull_requests"][repo_name]:
-            if pr["user"] and "login" in pr["user"]:
-                pr_number = pr["number"]
+        for pr in data.get("pull_requests", {}).get(repo_name, []):
+            user = pr.get("user") or {}
+            if not user.get("login"):
+                continue
 
-                # Only count PRs created or updated within the time period
-                pr_created_at = datetime.strptime(
-                    pr["created_at"], "%Y-%m-%dT%H:%M:%SZ"
-                ).isoformat()
-                pr_updated_at = datetime.strptime(
-                    pr["updated_at"], "%Y-%m-%dT%H:%M:%SZ"
-                ).isoformat()
+            pr_created = parse_github_date(pr["created_at"])
+            pr_updated = parse_github_date(pr["updated_at"])
 
-                # Only include PRs that were created or updated since the specified date
-                if pr_created_at >= since or pr_updated_at >= since:
-                    author = pr["user"]["login"]
-                    pr_counts[author] += 1
+            if pr_created >= since_date or pr_updated >= since_date:
+                dev = get_developer(user["login"])
+                dev.prs_opened += 1
 
-                    if pr["merged_at"]:
-                        created_at = datetime.strptime(
-                            pr["created_at"], "%Y-%m-%dT%H:%M:%SZ"
+                if pr.get("merged_at"):
+                    merged_at = parse_github_date(pr["merged_at"])
+
+                    # PR merge time
+                    if pr_created >= since_date:
+                        merge_hours = (merged_at - pr_created).total_seconds() / 3600
+                        if merge_hours <= 30 * 24:  # Filter outliers > 30 days
+                            pr_merge_times.append(merge_hours)
+
+                    # Branch to merge time
+                    branch_name = pr.get("head", {}).get("ref")
+                    if branch_name:
+                        first_commit = (
+                            data.get("branch_first_commits", {})
+                            .get(repo_name, {})
+                            .get(branch_name)
                         )
-                        merged_at = datetime.strptime(
-                            pr["merged_at"], "%Y-%m-%dT%H:%M:%SZ"
-                        )
-
-                        # Track traditional PR creation to merge time
-                        if pr_created_at >= since and pr["merged_at"] >= since:
-                            merge_time_hours = (
-                                merged_at - created_at
-                            ).total_seconds() / 3600  # in hours
-
-                            # Filter out extreme outliers (PRs that took more than 30 days to merge)
-                            if merge_time_hours <= 30 * 24:  # 30 days in hours
-                                pr_merge_times.append(merge_time_hours)
-                                pr_merge_times_for_repo.append(merge_time_hours)
-                            else:
-                                print(
-                                    f"Excluding outlier PR #{pr_number} in {repo_name} with merge time of {merge_time_hours:.2f} hours"
-                                )
-
-                        # Now calculate branch creation to merge time
-                        branch_name = (
-                            pr["head"]["ref"]
-                            if "head" in pr and "ref" in pr["head"]
-                            else None
-                        )
-
-                        if branch_name and branch_name in data[
-                            "branch_first_commits"
-                        ].get(repo_name, {}):
-                            first_commit = data["branch_first_commits"][repo_name][
-                                branch_name
-                            ]
-                            if (
-                                first_commit
-                                and "commit" in first_commit
-                                and "committer" in first_commit["commit"]
-                                and "date" in first_commit["commit"]["committer"]
-                            ):
-                                # Get the timestamp of the first commit
-                                branch_start_date = datetime.strptime(
-                                    first_commit["commit"]["committer"]["date"],
-                                    "%Y-%m-%dT%H:%M:%SZ",
-                                )
-
-                                # Calculate how long from first commit to merge
-                                branch_to_merge_time = (
-                                    merged_at - branch_start_date
-                                ).total_seconds() / 3600  # in hours
-
-                                # Filter out extreme outliers
+                        if first_commit:
+                            commit_date_str = (
+                                first_commit.get("commit", {})
+                                .get("committer", {})
+                                .get("date")
+                            )
+                            if commit_date_str:
+                                branch_start = parse_github_date(commit_date_str)
+                                branch_merge_hours = (
+                                    merged_at - branch_start
+                                ).total_seconds() / 3600
                                 if (
-                                    branch_to_merge_time <= 90 * 24
-                                ):  # 90 days in hours - branches can live longer than PRs
-                                    branch_to_merge_times.append(branch_to_merge_time)
-                                    branch_to_merge_times_for_repo.append(
-                                        branch_to_merge_time
-                                    )
-                                else:
-                                    print(
-                                        f"Excluding outlier branch {branch_name} in {repo_name} with lifetime of {branch_to_merge_time:.2f} hours"
+                                    branch_merge_hours <= 90 * 24
+                                ):  # Filter outliers > 90 days
+                                    branch_to_merge_times.append(branch_merge_hours)
+                                    branch_merge_times_for_repo.append(
+                                        branch_merge_hours
                                     )
 
-                total_prs_processed += 1
+        repo_branch_to_merge_times[repo_name] = branch_merge_times_for_repo
 
-        # Store the merge times for this repo
-        repo_branch_to_merge_times[repo_name] = branch_to_merge_times_for_repo
-
-        if branch_to_merge_times_for_repo:
-            print(
-                f"Branch-to-merge times for {repo_name}: min={min(branch_to_merge_times_for_repo):.2f}h, max={max(branch_to_merge_times_for_repo):.2f}h, avg={sum(branch_to_merge_times_for_repo) / len(branch_to_merge_times_for_repo):.2f}h, count={len(branch_to_merge_times_for_repo)}"
+        if branch_merge_times_for_repo:
+            metrics.avg_branch_to_merge_time = sum(branch_merge_times_for_repo) / len(
+                branch_merge_times_for_repo
             )
-        else:
-            print(f"No valid branch-to-merge time data for {repo_name}")
+            metrics.branch_merges_count = len(branch_merge_times_for_repo)
 
-    print(f"DEBUG: Processed {total_prs_processed} PRs")
-    print(f"DEBUG: Found {total_reviews_found} reviews during analysis")
-    print(f"DEBUG: Found {total_comments_found} comments during analysis")
-    print(f"DEBUG: PR Reviews counter has {sum(pr_reviews.values())} entries")
-    print(f"DEBUG: PR Comments counter has {sum(pr_comments.values())} entries")
+        metrics.activity = repo_activity.get(repo_name, 0)
+        repo_metrics.append(metrics)
 
-    # Calculate average branch-to-merge time per repository
-    repo_avg_branch_to_merge_times = {}
-    for repo_name, merge_times in repo_branch_to_merge_times.items():
-        if merge_times:
-            repo_avg_branch_to_merge_times[repo_name] = sum(merge_times) / len(
-                merge_times
-            )
-        else:
-            repo_avg_branch_to_merge_times[repo_name] = 0
-
-    def format_repos(repos_dict):
+    # Build DataFrames
+    def format_repos_list(repos_dict: dict[str, int]) -> str:
         sorted_repos = sorted(repos_dict.items(), key=lambda x: x[1], reverse=True)
         if len(sorted_repos) <= 5:
-            return ", ".join(repo for repo, _ in sorted_repos)
-        else:
-            top_5 = ", ".join(repo for repo, _ in sorted_repos[:5])
-            remaining = len(sorted_repos) - 5
-            return f"{top_5} +{remaining} more"
+            return ", ".join(r for r, _ in sorted_repos)
+        top_5 = ", ".join(r for r, _ in sorted_repos[:5])
+        return f"{top_5} +{len(sorted_repos) - 5} more"
 
     df_developers = pd.DataFrame(
-        {
-            "Developer": list(
-                set(
-                    list(commit_counts.keys())
-                    + list(pr_reviews.keys())
-                    + list(pr_comments.keys())
-                )
-            ),
-            "Commits": [
-                commit_counts.get(dev, 0)
-                for dev in set(
-                    list(commit_counts.keys())
-                    + list(pr_reviews.keys())
-                    + list(pr_comments.keys())
-                )
-            ],
-            "Lines Added": [
-                lines_added.get(dev, 0)
-                for dev in set(
-                    list(commit_counts.keys())
-                    + list(pr_reviews.keys())
-                    + list(pr_comments.keys())
-                )
-            ],
-            "Lines Deleted": [
-                lines_deleted.get(dev, 0)
-                for dev in set(
-                    list(commit_counts.keys())
-                    + list(pr_reviews.keys())
-                    + list(pr_comments.keys())
-                )
-            ],
-            "PRs Opened": [
-                pr_counts.get(dev, 0)
-                for dev in set(
-                    list(commit_counts.keys())
-                    + list(pr_reviews.keys())
-                    + list(pr_comments.keys())
-                )
-            ],
-            "PRs Reviewed": [
-                pr_reviews.get(dev, 0)
-                for dev in set(
-                    list(commit_counts.keys())
-                    + list(pr_reviews.keys())
-                    + list(pr_comments.keys())
-                )
-            ],
-            "PR Comments": [
-                pr_comments.get(dev, 0)
-                for dev in set(
-                    list(commit_counts.keys())
-                    + list(pr_reviews.keys())
-                    + list(pr_comments.keys())
-                )
-            ],
-            "Repositories": [
-                format_repos(repos_worked_on.get(dev, {}))
-                for dev in set(
-                    list(commit_counts.keys())
-                    + list(pr_reviews.keys())
-                    + list(pr_comments.keys())
-                )
-            ],
-        }
+        [
+            {
+                "Developer": dev.name,
+                "Commits": dev.commits,
+                "Lines Added": dev.lines_added,
+                "Lines Deleted": dev.lines_deleted,
+                "PRs Opened": dev.prs_opened,
+                "PRs Reviewed": dev.prs_reviewed,
+                "PR Comments": dev.pr_comments,
+                "Repositories": format_repos_list(dev.repositories),
+            }
+            for dev in developers.values()
+        ]
     )
-
     df_developers = df_developers.sort_values("Commits", ascending=False)
 
-    # Add average branch-to-merge time to repo details
-    for repo in repo_details:
-        repo["avg_branch_to_merge_time"] = repo_avg_branch_to_merge_times.get(
-            repo["name"], 0
-        )
-        repo["branch_merges_count"] = len(
-            repo_branch_to_merge_times.get(repo["name"], [])
-        )
-
-    df_repos = pd.DataFrame(repo_details)
-    df_repos["Activity"] = df_repos["name"].map(repo_activity)
-    df_repos = df_repos[
+    df_repos = pd.DataFrame(
         [
-            "name",
-            "Activity",
-            "avg_branch_to_merge_time",
-            "branch_merges_count",
-            "deployment_count",
-            "failure_rate",
-            "avg_recovery_time",
-            "avg_deployment_duration",
-            "deployment_durations_count",
-            "created_at",
-            "updated_at",
-            "language",
-            "branch_count",
-            "contributor_count",
+            {
+                "name": m.name,
+                "Activity": m.activity,
+                "avg_branch_to_merge_time": m.avg_branch_to_merge_time,
+                "branch_merges_count": m.branch_merges_count,
+                "deployment_count": m.deployment_count,
+                "failure_rate": m.failure_rate,
+                "avg_recovery_time": m.avg_recovery_time,
+                "avg_deployment_duration": m.avg_deployment_duration,
+                "deployment_durations_count": m.deployment_durations_count,
+                "created_at": m.created_at,
+                "updated_at": m.updated_at,
+                "language": m.language,
+                "branch_count": m.branch_count,
+                "contributor_count": m.contributor_count,
+            }
+            for m in repo_metrics
         ]
-    ]
+    )
     df_repos = df_repos.sort_values("Activity", ascending=False)
 
-    # Calculate overall averages - only for repositories in our analysis set
-    avg_pr_merge_time = (
-        sum(pr_merge_times) / len(pr_merge_times) if pr_merge_times else 0
-    )
-    avg_branch_to_merge_time = (
+    # Print results
+    avg_pr_merge = sum(pr_merge_times) / len(pr_merge_times) if pr_merge_times else 0
+    avg_branch_merge = (
         sum(branch_to_merge_times) / len(branch_to_merge_times)
         if branch_to_merge_times
         else 0
     )
 
-    # Format the DataFrames for better readability
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("FINAL RESULTS")
+    logger.info("=" * 80)
+    logger.info("Analyzed Repositories: %s", ", ".join(repo_names))
+    logger.info("Average PR Merge Time: %.2f hours", avg_pr_merge)
+    logger.info("Average Branch-to-Merge Time: %.2f hours", avg_branch_merge)
+
     pd.set_option("display.max_colwidth", None)
-
-    developer_formatters = {
-        "Developer": lambda x: f"{x:<20}",
-        "Commits": lambda x: f"{x:>7}",
-        "Lines Added": lambda x: f"{x:>11}",
-        "Lines Deleted": lambda x: f"{x:>13}",
-        "PRs Opened": lambda x: f"{x:>10}",
-        "PRs Reviewed": lambda x: f"{x:>12}",
-        "PR Comments": lambda x: f"{x:>11}",
-        "Repositories": lambda x: f"{x}",
-    }
-
-    repo_formatters = {
-        "name": lambda x: f"{x:<30}",
-        "Activity": lambda x: f"{x:>8}",
-        "avg_branch_to_merge_time": lambda x: f"{x:>24.2f}",
-        "branch_merges_count": lambda x: f"{x:>19}",
-        "deployment_count": lambda x: f"{x:>16}",
-        "failure_rate": lambda x: f"{x:>12.2f}%",
-        "avg_recovery_time": lambda x: f"{x:>17.2f}",
-        "avg_deployment_duration": lambda x: f"{x:>22.2f}",
-        "deployment_durations_count": lambda x: f"{x:>24}",
-        "created_at": lambda x: f"{x:>20}",
-        "updated_at": lambda x: f"{x:>20}",
-        "language": lambda x: f"{x:<10}",
-        "branch_count": lambda x: f"{x:>12}",
-        "contributor_count": lambda x: f"{x:>18}",
-    }
-
-    # Information about which repositories are included in the analysis
-    analyzed_repos = ", ".join([repo for repo in repo_names])
-
-    print("\nFinal Results:")
-    print(f"Analyzed Repositories: {analyzed_repos}")
-    print(f"Total Repositories Processed: {len(data['repos'])}")
-    print(f"\nAverage PR Merge Time (from PR creation): {avg_pr_merge_time:.2f} hours")
-    print(
-        f"Average Branch-to-Merge Time (from first commit): {avg_branch_to_merge_time:.2f} hours"
-    )
     print("\nDeveloper Activity:")
-    print(
-        df_developers.to_string(
-            index=False, formatters=developer_formatters, justify="left"
-        )
-    )
+    print(df_developers.to_string(index=False))
     print("\nRepository Details:")
-    print(df_repos.to_string(index=False, formatters=repo_formatters, justify="left"))
+    print(df_repos.to_string(index=False))
 
-    # Add a DORA metrics summary to the final output - only for repositories in our analysis set
+    # DORA summary
     print("\nDORA Metrics Summary:")
-    print(f"Lead Time (Branch to Merge): {avg_branch_to_merge_time:.2f} hours")
+    print(f"Lead Time (Branch to Merge): {avg_branch_merge:.2f} hours")
 
-    # Add GitHub Actions deployment duration summary - only for analyzed repositories
-    deployment_durations_for_analyzed_repos = []
-    for repo_name in repo_names:
-        if repo_name in repo_deployment_durations:
-            deployment_durations_for_analyzed_repos.extend(
-                repo_deployment_durations[repo_name]
-            )
-
-    if deployment_durations_for_analyzed_repos:
-        avg_deployment_duration = sum(deployment_durations_for_analyzed_repos) / len(
-            deployment_durations_for_analyzed_repos
+    all_durations = [
+        d for durations in repo_deployment_durations.values() for d in durations
+    ]
+    if all_durations:
+        print(
+            f"Average Deployment Duration: {sum(all_durations) / len(all_durations):.2f} minutes"
         )
-        print(f"Average Deployment Duration: {avg_deployment_duration:.2f} minutes")
     else:
-        print("Average Deployment Duration: No data available")
+        print("Average Deployment Duration: No data")
 
-    # Calculate average deployment frequency (per week per repo) - only for analyzed repositories
-    try:
-        # Try different date formats to handle variations in the 'since' format
-        try:
-            since_date = datetime.strptime(since, "%Y-%m-%dT%H:%M:%S.%f")
-        except ValueError:
-            try:
-                since_date = datetime.strptime(since, "%Y-%m-%dT%H:%M:%S")
-            except ValueError:
-                since_date = datetime.strptime(since, "%Y-%m-%d")
-
-        weeks_in_period = (datetime.now() - since_date).days / 7
-
-        # Only count deployment data for our analyzed repositories
-        total_deployments_in_analyzed_repos = sum(
-            repo_deployment_counts[repo_name] for repo_name in repo_names
-        )
-        active_repos = sum(
-            1 for repo_name in repo_names if repo_deployment_counts[repo_name] > 0
-        )
-
-        if active_repos > 0 and weeks_in_period > 0:
-            avg_deployments_per_week = total_deployments_in_analyzed_repos / (
-                active_repos * weeks_in_period
-            )
-            print(
-                f"Deployment Frequency: {avg_deployments_per_week:.2f} deployments per week per active repo"
-            )
-        else:
-            print(
-                "Deployment Frequency: No active repositories with deployments in the time period"
-            )
-    except Exception as e:
-        print(f"Error calculating deployment frequency: {e}")
-
-    # Calculate overall failure rate - only for analyzed repositories
-    total_deployments = sum(
-        repo_deployment_counts[repo_name] for repo_name in repo_names
-    )
-    total_failures = sum(
-        repo_deployment_failures[repo_name] for repo_name in repo_names
-    )
-
+    total_deployments = sum(repo_deployment_counts.values())
+    total_failures = sum(repo_deployment_failures.values())
     if total_deployments > 0:
-        overall_failure_rate = (total_failures / total_deployments) * 100
-        print(f"Change Failure Rate: {overall_failure_rate:.2f}%")
+        print(f"Change Failure Rate: {(total_failures / total_deployments) * 100:.2f}%")
     else:
-        print("Change Failure Rate: No deployment data available")
-
-    # Calculate average recovery time - only for analyzed repositories
-    recovery_times_for_analyzed_repos = []
-    for repo_name in repo_names:
-        if repo_name in repo_deployment_recovery_times:
-            recovery_times_for_analyzed_repos.extend(
-                repo_deployment_recovery_times[repo_name]
-            )
-
-    if recovery_times_for_analyzed_repos:
-        avg_recovery_time = sum(recovery_times_for_analyzed_repos) / len(
-            recovery_times_for_analyzed_repos
-        )
-        print(f"Mean Time to Recover: {avg_recovery_time:.2f} hours")
-    else:
-        print("Mean Time to Recover: No recovery time data available")
+        print("Change Failure Rate: No data")
 
     return df_developers, df_repos
 
 
-def save_cache(data, org):
-    cache_file = f"{org}_{CACHE_FILE}"
-    with open(cache_file, "w") as f:
+def save_cache(data: dict[str, Any], org: str) -> None:
+    """Save fetched data to a cache file."""
+    cache_file = Path(f"{org}{CACHE_FILE_SUFFIX}")
+    with cache_file.open("w") as f:
         json.dump(data, f)
+    logger.info("Data cached to %s", cache_file)
 
 
-def load_cache(org):
-    cache_file = f"{org}_{CACHE_FILE}"
-    if os.path.exists(cache_file):
-        with open(cache_file, "r") as f:
+def load_cache(org: str) -> dict[str, Any] | None:
+    """Load cached data if available."""
+    cache_file = Path(f"{org}{CACHE_FILE_SUFFIX}")
+    if cache_file.exists():
+        with cache_file.open() as f:
             return json.load(f)
     return None
 
 
 def main(
-    org, months, repos_count=20, target_repos=None, use_cache=False, update_cache=False
-):
+    org: str,
+    months: int,
+    token: str,
+    *,
+    repos_count: int = 20,
+    target_repos: list[str] | None = None,
+    use_cache: bool = False,
+    update_cache: bool = False,
+) -> None:
+    """Main entry point for the GitHub metrics script.
+
+    Args:
+        org: The GitHub organization name.
+        months: Number of months to analyze.
+        token: GitHub Personal Access Token.
+        repos_count: Max repos to analyze (if no target specified).
+        target_repos: Optional list of specific repos.
+        use_cache: Whether to use cached data.
+        update_cache: Whether to refresh the cache.
+    """
+    data: dict[str, Any] | None = None
+
     if use_cache and not update_cache:
         data = load_cache(org)
         if data:
-            print("Using cached data")
-
-            # If target repos specified, filter cached data
+            logger.info("Using cached data")
             if target_repos:
-                data["repos"] = [
-                    repo for repo in data["repos"] if repo["name"] in target_repos
-                ]
-                print(f"Filtered cache to {len(data['repos'])} target repositories")
-
-            # Debug: check if there are any PR reviews and comments in the cache
-            review_count = 0
-            comment_count = 0
-            for repo_name in data["pr_reviews"]:
-                for pr_number in data["pr_reviews"][repo_name]:
-                    review_count += len(data["pr_reviews"][repo_name][pr_number] or [])
-
-            for repo_name in data["pr_comments"]:
-                for pr_number in data["pr_comments"][repo_name]:
-                    comment_count += len(
-                        data["pr_comments"][repo_name][pr_number] or []
-                    )
-
-            print(
-                f"DEBUG: Found {review_count} reviews and {comment_count} comments in cache"
-            )
+                data["repos"] = [r for r in data["repos"] if r["name"] in target_repos]
+                logger.info("Filtered cache to %d target repos", len(data["repos"]))
         else:
-            print("Cache not found, fetching new data")
-            use_cache = False
+            logger.warning("Cache not found, fetching new data")
 
-    if not use_cache or update_cache:
-        # Set the time range for data collection
-        end_date = datetime.now()
+    if data is None or update_cache:
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=30 * months)
-        since = start_date.isoformat()
+        since = start_date.isoformat().replace("+00:00", "Z")
 
-        print(f"\nFetching data from GitHub API for organization: {org}")
-        data = fetch_data(org, since, target_repos)
+        logger.info("Fetching data for organization: %s", org)
+        client = GitHubAPIClient(token)
+        data = fetch_data(client, org, since, target_repos)
         save_cache(data, org)
-        print("Data fetched and cached")
 
-    # Always use the specified time range for analysis, even if cached data is older
-    end_date = datetime.now()
+    # Analyze with current time range
+    end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=30 * months)
-    since = start_date.isoformat()
+    since = start_date.isoformat().replace("+00:00", "Z")
 
     df_developers, df_repos = analyze_data(data, since)
 
-    # Save results to CSV files
+    # Save CSVs
     df_developers.to_csv(f"{org}_github_developer_metrics.csv", index=False)
     df_repos.to_csv(f"{org}_github_repository_metrics.csv", index=False)
 
-    print(
-        f"\nResults saved to {org}_github_developer_metrics.csv and {org}_github_repository_metrics.csv"
+    logger.info("Results saved to %s_github_*.csv", org)
+
+
+def cli() -> None:
+    """Command-line interface entry point."""
+    parser = argparse.ArgumentParser(
+        description="Fetch and analyze GitHub organization metrics with DORA insights.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s my-org                           Analyze top 20 repos from last 3 months
+  %(prog)s my-org --months 6                Analyze last 6 months
+  %(prog)s my-org --target-repos a b c      Analyze specific repos
+  %(prog)s my-org --use-cache               Use cached data
+  %(prog)s my-org --update-cache            Refresh the cache
+        """,
     )
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GitHub Metrics Script")
     parser.add_argument("org", help="GitHub organization name")
     parser.add_argument(
-        "--months", type=int, default=3, help="Number of months to analyze (default: 3)"
+        "--months", type=int, default=3, help="Months to analyze (default: 3)"
     )
     parser.add_argument(
-        "--repos",
-        type=int,
-        default=20,
-        help="Number of top repositories to analyze when no specific repos are targeted (default: 20)",
+        "--repos", type=int, default=20, help="Max repos to analyze (default: 20)"
     )
+    parser.add_argument("--target-repos", nargs="+", help="Specific repos to analyze")
+    parser.add_argument("--use-cache", action="store_true", help="Use cached data")
+    parser.add_argument("--update-cache", action="store_true", help="Refresh cache")
     parser.add_argument(
-        "--target-repos",
-        nargs="+",
-        help="List of specific repositories to analyze (e.g., --target-repos repo-a repo-b)",
+        "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
-    parser.add_argument(
-        "--use-cache", action="store_true", help="Use cached data if available"
-    )
-    parser.add_argument(
-        "--update-cache", action="store_true", help="Update the cache with fresh data"
-    )
+
     args = parser.parse_args()
 
-    if not GITHUB_TOKEN:
-        print("Error: GITHUB_TOKEN environment variable is not set.")
-        print("Set it with: export GITHUB_TOKEN=your_github_token")
-        exit(1)
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
-    print(f"Using token: {GITHUB_TOKEN[:4]}...{GITHUB_TOKEN[-4:]}")
-    print(f"Organization: {args.org}")
-    print(f"Analyzing data for the last {args.months} months")
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        logger.error("GITHUB_TOKEN environment variable not set.")
+        sys.exit(1)
+
+    logger.info("Token: %s...%s", token[:4], token[-4:])
+    logger.info("Organization: %s", args.org)
+    logger.info("Analyzing last %d months", args.months)
 
     if args.target_repos:
-        print(f"Analyzing specific repositories: {', '.join(args.target_repos)}")
+        logger.info("Target repos: %s", ", ".join(args.target_repos))
     else:
-        print(f"Analyzing top {args.repos} repositories")
+        logger.info("Analyzing top %d repos", args.repos)
 
     main(
         args.org,
         args.months,
-        args.repos,
-        args.target_repos,
+        token,
+        repos_count=args.repos,
+        target_repos=args.target_repos,
         use_cache=args.use_cache,
         update_cache=args.update_cache,
     )
+
+
+if __name__ == "__main__":
+    cli()

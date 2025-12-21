@@ -1,149 +1,238 @@
 # GitHub Organization Metrics
 
-This Python script fetches and analyzes metrics for a specified GitHub organization, providing insights into repository activity and developer contributions. It focuses on the top repositories that were changed within a specified time frame.
+A Python tool to fetch and analyze GitHub organization metrics, including developer activity, repository statistics, and [DORA metrics](https://dora.dev/) for measuring software delivery performance.
+
+![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)
+![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
 
 ## Features
 
-- Fetches data for the top repositories in a specified GitHub organization
-- Analyzes developer activity (commits, lines added/deleted)
-- Provides detailed repository metrics (activity, creation date, last update, language, etc.)
-- Allows customization of the number of months to analyze and the number of top repositories to consider
-- Caches data to reduce API calls and allow for quick re-analysis
-- Outputs results to CSV files for further analysis
+### Developer Metrics
+- Commit counts and code contribution (lines added/deleted)
+- Pull requests opened, reviewed, and commented on
+- Repository contribution breakdown
+
+### Repository Metrics
+- Activity levels and commit frequency
+- Branch and contributor counts
+- Primary programming language
+- Creation and last update dates
+
+### DORA Metrics
+[DORA (DevOps Research and Assessment)](https://dora.dev/) metrics help measure software delivery performance:
+
+| Metric | Description |
+|--------|-------------|
+| **Lead Time** | Time from first commit to merge (branch-to-merge time) |
+| **Deployment Frequency** | How often code is deployed per repository |
+| **Change Failure Rate** | Percentage of deployments that fail |
+| **Mean Time to Recover** | Average recovery time after failures |
+
+### Additional Features
+- **Caching**: Save API responses locally for faster re-analysis
+- **Configurable**: Analyze specific repos or top N by activity
+- **CSV Export**: Export results for further analysis in spreadsheets
 
 ## Prerequisites
 
-- [uv](https://github.com/astral-sh/uv) - Fast Python package installer and resolver
-- Git (for cloning the repository)
-- GitHub Personal Access Token with appropriate permissions
+- [uv](https://docs.astral.sh/uv/) - Fast Python package installer and resolver
+- Git
+- [GitHub Personal Access Token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) with appropriate permissions
 
-## Installation and Setup
+## Installation
 
-1. Clone the repository:
+1. **Clone the repository:**
 
-   ```
-   git clone https://github.com/your-username/github-org-metrics.git
+   ```bash
+   git clone https://github.com/rgilks/github-org-metrics.git
    cd github-org-metrics
    ```
 
-2. Install dependencies with uv:
+2. **Install dependencies:**
 
-   ```
+   ```bash
    uv sync
    ```
 
-4. Set up your GitHub Personal Access Token:
+3. **Create a GitHub Personal Access Token:**
 
-   - Go to GitHub Settings > Developer Settings > Personal Access Tokens > Fine-grained tokens
-   - Create a new token with the following permissions:
-     - Repository permissions:
-       - Actions: Read-only
-       - Contents: Read-only
-       - Deployments: Read-only
-       - Issues: Read-only
-       - Metadata: Read-only
-       - Pull Requests: Read-only
-     - Organization permissions:
-       - Administration: Read-only
-       - Members: Read-only
+   Go to [GitHub Settings → Developer Settings → Personal Access Tokens → Fine-grained tokens](https://github.com/settings/tokens?type=beta) and create a token with these permissions:
 
-5. Set your token as an environment variable:
+   **Repository permissions:**
+   | Permission | Access |
+   |------------|--------|
+   | Actions | Read-only |
+   | Contents | Read-only |
+   | Deployments | Read-only |
+   | Issues | Read-only |
+   | Metadata | Read-only |
+   | Pull requests | Read-only |
+
+   **Organization permissions:**
+   | Permission | Access |
+   |------------|--------|
+   | Administration | Read-only |
+   | Members | Read-only |
+
+   For more details, see [GitHub's permissions documentation](https://docs.github.com/en/rest/overview/permissions-required-for-fine-grained-personal-access-tokens).
+
+4. **Set the token as an environment variable:**
+
+   ```bash
+   export GITHUB_TOKEN=your_token_here
    ```
-   export GITHUB_TOKEN=your_fine_grained_token_here
-   ```
+
+   > **Tip:** Add this to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) for persistence.
 
 ## Usage
 
-Run the script using `uv run`:
-
-```
-uv run github_metrics.py <organization_name> [--months MONTHS] [--repos REPOS] [--use-cache] [--update-cache] [--target-repos REPOS]
+```bash
+uv run github_metrics.py <organization> [options]
 ```
 
-Arguments:
+### Options
 
-- `<organization_name>`: The name of the GitHub organization you want to analyze (required)
-- `--months MONTHS`: Number of months to analyze (default: 3)
-- `--repos REPOS`: Number of top repositories to analyze (default: 20)
-- `--use-cache`: Use cached data if available (optional)
-- `--update-cache`: Update the cache with fresh data (optional)
-- `--target-repos REPOS`: Comma-separated list of repositories to analyze (optional)
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--months N` | Number of months to analyze | 3 |
+| `--repos N` | Maximum repositories (when not targeting specific repos) | 20 |
+| `--target-repos A B C` | Analyze specific repositories only | - |
+| `--use-cache` | Use cached data if available | - |
+| `--update-cache` | Refresh the cache with new data | - |
+| `-v, --verbose` | Enable debug logging | - |
 
-Examples:
+### Examples
 
-- To fetch new data for an organization's top 20 repos in the last 3 months:
-  ```
-  uv run github_metrics.py MyOrgName
-  ```
-- To analyze the top 10 repos from the last 6 months:
-  ```
-  uv run github_metrics.py MyOrgName --months 6 --repos 10
-  ```
-- To use cached data (if available):
-  ```
-  uv run github_metrics.py MyOrgName --use-cache
-  ```
-- To update the cache with fresh data:
-  ```
-  uv run github_metrics.py MyOrgName --update-cache
-  ```
-- To analyze specific repositories:
-  ```
-  uv run github_metrics.py MyOrgName --target-repos repo-a repo-b
-  ```
+```bash
+# Analyze top 20 repos from the last 3 months
+uv run github_metrics.py my-organization
+
+# Analyze last 6 months, top 10 repos
+uv run github_metrics.py my-organization --months 6 --repos 10
+
+# Analyze specific repositories
+uv run github_metrics.py my-organization --target-repos api-service web-app
+
+# Use cached data for faster re-analysis
+uv run github_metrics.py my-organization --use-cache
+
+# Refresh cache and re-analyze
+uv run github_metrics.py my-organization --update-cache
+
+# Enable verbose output for debugging
+uv run github_metrics.py my-organization -v
+```
 
 ## Output
 
 The script generates two CSV files:
 
-1. `<org_name>_github_developer_metrics.csv`: Contains metrics for each developer, including:
+### `<org>_github_developer_metrics.csv`
 
-   - Number of commits
-   - Lines added and deleted
-   - PRs opened, reviewed, and commented on
-   - Top repositories contributed to
+| Column | Description |
+|--------|-------------|
+| Developer | GitHub username |
+| Commits | Number of commits in the period |
+| Lines Added | Total lines of code added |
+| Lines Deleted | Total lines of code deleted |
+| PRs Opened | Pull requests created |
+| PRs Reviewed | Pull requests reviewed |
+| PR Comments | Comments on pull requests |
+| Repositories | Top repositories contributed to |
 
-2. `<org_name>_github_repository_metrics.csv`: Contains metrics for each repository, including:
-   - Repository name
-   - Activity level (number of commits)
-   - Creation and last update dates
-   - Primary programming language
-   - Number of branches
-   - Number of contributors
+### `<org>_github_repository_metrics.csv`
 
-The script also prints a formatted version of these results to the console.
+| Column | Description |
+|--------|-------------|
+| name | Repository name |
+| Activity | Number of commits in the period |
+| avg_branch_to_merge_time | Average hours from branch to merge |
+| deployment_count | Number of CI/CD deployments |
+| failure_rate | Percentage of failed deployments |
+| avg_deployment_duration | Average deployment time (minutes) |
+| language | Primary programming language |
+| branch_count | Number of branches |
+| contributor_count | Number of contributors |
 
 ## Caching
 
-The script uses a JSON file (`<org_name>_github_data_cache.json`) to store raw data. This allows for:
+Data is cached to `<org>_github_data_cache.json`. This allows:
 
-- Quick re-running of analyses without making API calls
-- Experimentation with different analysis methods on the same dataset
-- Maintenance of a historical record of your GitHub data
+- **Faster re-runs**: Skip API calls when experimenting with analysis
+- **Offline analysis**: Work with previously fetched data
+- **Historical snapshots**: Keep records of your metrics over time
 
-## Customization
+> **Note:** The cache stores raw API data. Use `--update-cache` to refresh with the latest data.
 
-- You can adjust the number of months to analyze and the number of top repositories to consider using the `--months` and `--repos` arguments.
-- The script focuses on repositories that have been pushed to within the specified time frame.
+## Understanding DORA Metrics
+
+This tool calculates DORA metrics based on your GitHub data:
+
+### Lead Time for Changes
+Measured as the time from the first commit on a branch to when it's merged. Lower is better—elite performers typically achieve less than 1 hour.
+
+### Deployment Frequency
+Calculated from GitHub Actions workflow runs. Tracks how often your CI/CD pipeline successfully deploys. Elite performers deploy on demand (multiple times per day).
+
+### Change Failure Rate
+The percentage of deployments that result in failures (based on workflow run conclusions). Elite performers have less than 15% failure rate.
+
+### Mean Time to Recover
+The average time to recover from a failed deployment. Elite performers recover in less than 1 hour.
+
+For more on DORA metrics and how to improve them, see:
+- [DORA Research](https://dora.dev/research/)
+- [DORA Quick Check](https://dora.dev/quickcheck/)
+- [Four Keys to Software Delivery Performance](https://cloud.google.com/blog/products/devops-sre/using-the-four-keys-to-measure-your-devops-performance)
 
 ## Limitations
 
-- The script may take a while to run for large organizations with many active repositories.
-- It's subject to GitHub API rate limits.
-- Some data may not be available depending on the permissions of your Personal Access Token.
+- **Rate limits**: The GitHub API has rate limits. Use `--use-cache` to minimize API calls.
+- **Large organizations**: May take a while to fetch data for organizations with many active repositories.
+- **Permissions**: Some metrics require specific token permissions. Ensure your token has all required scopes.
+- **DORA accuracy**: Metrics are approximated from available GitHub data. For example, deployment frequency relies on GitHub Actions workflows.
 
 ## Troubleshooting
 
-If you encounter issues:
+### "Rate limit exceeded"
+The script automatically waits and retries when rate limited. For faster runs, use `--use-cache` after the initial fetch.
 
-1. Ensure your GitHub token has the necessary permissions.
-2. Check that you're not hitting GitHub's API rate limits.
-3. For large organizations, consider reducing the number of repositories or the time range analyzed.
-4. If you're having dependency issues, try updating your dependencies:
-   ```
-   uv sync
-   ```
+### "Permission error"
+Ensure your GitHub token has all the required permissions listed in the Installation section.
+
+### "Repository not found"
+Check that:
+1. The repository exists and is accessible to your token
+2. You're using the correct organization name
+3. Your token has access to the organization
+
+### Dependency issues
+```bash
+uv sync
+```
+
+## Development
+
+This project uses modern Python tooling:
+
+- **[uv](https://docs.astral.sh/uv/)**: Package management
+- **[ruff](https://docs.astral.sh/ruff/)**: Linting and formatting
+
+```bash
+# Lint code
+uv run ruff check .
+
+# Format code
+uv run ruff format .
+```
 
 ## License
 
-This project is open-source and available under the MIT License.
+This project is open-source and available under the [MIT License](LICENSE).
+
+## References
+
+- [GitHub REST API Documentation](https://docs.github.com/en/rest)
+- [DORA Research Program](https://dora.dev/)
+- [uv Documentation](https://docs.astral.sh/uv/)
+- [Creating Fine-grained Personal Access Tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token)
