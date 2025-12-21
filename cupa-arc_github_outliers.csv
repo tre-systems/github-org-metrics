@@ -1,4 +1,0 @@
-Developer,Commits,Lines Added,Lines Deleted,PRs Opened,PRs Reviewed,PR Comments,Repositories
-agangoly,163,7625155,7617711,15,14,14,"aai-utils, scratch-python-template, speech-audio-quality-containers, EST-ELiT-AMA, nlp-repetition-detection"
-asad-khan-cupa,63,2229513,2207795,13,17,14,"aai-tf-infra-stacks, aai-speech-data-engineering, speech-processing-sqs, aai-data-pipelines, speech-asr +3 more"
-saeid-ce,6,565979,25,7,9,2,"speech-asr-orchestrator, speech-voiceprint, speech-alignment, speech-asr"
