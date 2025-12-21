@@ -772,9 +772,12 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
 
             if pr_created >= since_date or pr_updated >= since_date:
                 dev = get_developer(user["login"])
-                dev.prs_opened += 1
                 # Track repository for this developer
                 dev.repositories[repo_name] = dev.repositories.get(repo_name, 0) + 1
+
+                # Only count as "Opened" if actually created in the period
+                if pr_created >= since_date:
+                    dev.prs_opened += 1
 
                 if pr.get("merged_at"):
                     merged_at = parse_github_date(pr["merged_at"])
@@ -861,6 +864,12 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
             if not dev.name.endswith("[bot]")  # Exclude GitHub bots
         ]
     )
+    
+    # Filter developers who did not add/remove code (as requested: "did not add or remove code")
+    df_developers = df_developers[
+        (df_developers["Lines Added"] > 0) | (df_developers["Lines Deleted"] > 0)
+    ]
+
     df_developers = df_developers.sort_values("Lines Added", ascending=False)
 
     # Split outliers (developers with >100K lines added - likely committing generated files)
