@@ -415,6 +415,8 @@ def fetch_data(
     org: str,
     since: str,
     target_repos: list[str] | None = None,
+    *,
+    fetch_pr_details: bool = False,
 ) -> dict[str, Any]:
     """Fetch all metrics data for an organization.
 
@@ -423,6 +425,7 @@ def fetch_data(
         org: The GitHub organization name.
         since: ISO format date string.
         target_repos: Optional list of specific repos to analyze.
+        fetch_pr_details: If True, fetch per-PR reviews/comments (slow).
 
     Returns:
         A dictionary containing all fetched data.
@@ -488,39 +491,48 @@ def fetch_data(
         data["tags"][repo_name] = client.get_tags(org, repo_name)
         data["issues"][repo_name] = client.get_issues(org, repo_name)
 
-        # PR reviews, comments, and branch data
+        # PR reviews, comments, and branch data (only if --full)
         data["pr_reviews"][repo_name] = {}
         data["pr_comments"][repo_name] = {}
         data["branch_first_commits"][repo_name] = {}
 
-        total_prs = len(data["pull_requests"][repo_name])
-        logger.info("Processing %d PRs for %s", total_prs, repo_name)
+        if fetch_pr_details:
+            total_prs = len(data["pull_requests"][repo_name])
+            logger.info("Fetching details for %d PRs in %s", total_prs, repo_name)
 
-        for idx, pr in enumerate(data["pull_requests"][repo_name]):
-            pr_number = pr["number"]
+            for idx, pr in enumerate(data["pull_requests"][repo_name]):
+                pr_number = pr["number"]
 
-            if (idx + 1) % 20 == 0:
-                logger.debug("Processed %d/%d PRs", idx + 1, total_prs)
+                if (idx + 1) % 20 == 0:
+                    logger.debug("Processed %d/%d PRs", idx + 1, total_prs)
 
-            data["pr_reviews"][repo_name][pr_number] = client.get_pull_request_reviews(
-                org, repo_name, pr_number
-            )
-            data["pr_comments"][repo_name][pr_number] = (
-                client.get_pull_request_comments(org, repo_name, pr_number)
-            )
-
-            # Get branch first commit for open PRs
-            if pr.get("state") == "open" and pr.get("head", {}).get("ref"):
-                branch_name = pr["head"]["ref"]
-                data["branch_first_commits"][repo_name][branch_name] = (
-                    client.get_branch_commits(org, repo_name, branch_name)
+                data["pr_reviews"][repo_name][pr_number] = (
+                    client.get_pull_request_reviews(org, repo_name, pr_number)
                 )
-            # For merged PRs, use PR creation date as fallback
-            elif pr.get("merged_at") and pr.get("head", {}).get("ref"):
-                branch_name = pr["head"]["ref"]
-                data["branch_first_commits"][repo_name][branch_name] = {
-                    "commit": {"committer": {"date": pr["created_at"]}}
-                }
+                data["pr_comments"][repo_name][pr_number] = (
+                    client.get_pull_request_comments(org, repo_name, pr_number)
+                )
+
+                # Get branch first commit for open PRs
+                if pr.get("state") == "open" and pr.get("head", {}).get("ref"):
+                    branch_name = pr["head"]["ref"]
+                    data["branch_first_commits"][repo_name][branch_name] = (
+                        client.get_branch_commits(org, repo_name, branch_name)
+                    )
+                # For merged PRs, use PR creation date as fallback
+                elif pr.get("merged_at") and pr.get("head", {}).get("ref"):
+                    branch_name = pr["head"]["ref"]
+                    data["branch_first_commits"][repo_name][branch_name] = {
+                        "commit": {"committer": {"date": pr["created_at"]}}
+                    }
+        else:
+            # Fast mode: use PR creation dates as branch start (no per-PR API calls)
+            for pr in data["pull_requests"][repo_name]:
+                if pr.get("merged_at") and pr.get("head", {}).get("ref"):
+                    branch_name = pr["head"]["ref"]
+                    data["branch_first_commits"][repo_name][branch_name] = {
+                        "commit": {"committer": {"date": pr["created_at"]}}
+                    }
 
     return data
 
@@ -910,6 +922,7 @@ def main(
     target_repos: list[str] | None = None,
     use_cache: bool = False,
     update_cache: bool = False,
+    fetch_pr_details: bool = False,
 ) -> None:
     """Main entry point for the GitHub metrics script.
 
@@ -921,6 +934,7 @@ def main(
         target_repos: Optional list of specific repos.
         use_cache: Whether to use cached data.
         update_cache: Whether to refresh the cache.
+        fetch_pr_details: If True, fetch per-PR reviews/comments (slow).
     """
     data: dict[str, Any] | None = None
 
@@ -941,7 +955,9 @@ def main(
 
         logger.info("Fetching data for organization: %s", org)
         client = GitHubAPIClient(token)
-        data = fetch_data(client, org, since, target_repos)
+        data = fetch_data(
+            client, org, since, target_repos, fetch_pr_details=fetch_pr_details
+        )
         save_cache(data, org)
 
     # Analyze with current time range
@@ -985,6 +1001,9 @@ Examples:
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
+    parser.add_argument(
+        "--full", action="store_true", help="Fetch detailed PR reviews/comments (slow)"
+    )
 
     args = parser.parse_args()
 
@@ -1013,6 +1032,7 @@ Examples:
         target_repos=args.target_repos,
         use_cache=args.use_cache,
         update_cache=args.update_cache,
+        fetch_pr_details=args.full,
     )
 
 

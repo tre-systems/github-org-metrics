@@ -2,7 +2,7 @@
 
 A Python tool to fetch and analyze GitHub organization metrics, including developer activity, repository statistics, and [DORA metrics](https://dora.dev/) for measuring software delivery performance.
 
-![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)
+![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
 
 ## Features

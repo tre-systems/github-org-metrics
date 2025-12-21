@@ -3,7 +3,7 @@ name = "github-org-metrics"
 version = "0.1.0"
 description = "Fetch and analyze GitHub organization metrics including DORA metrics"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
     "requests>=2.31.0",
     "pandas>=2.0.3",
