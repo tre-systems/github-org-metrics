@@ -847,6 +847,11 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
     )
     df_developers = df_developers.sort_values("Lines Added", ascending=False)
 
+    # Split outliers (developers with >100K lines added - likely committing generated files)
+    OUTLIER_THRESHOLD = 100_000
+    df_outliers = df_developers[df_developers["Lines Added"] > OUTLIER_THRESHOLD].copy()
+    df_developers = df_developers[df_developers["Lines Added"] <= OUTLIER_THRESHOLD]
+
     df_repos = pd.DataFrame(
         [
             {
@@ -887,6 +892,11 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
     pd.set_option("display.max_colwidth", None)
     print("\nDeveloper Activity:")
     print(df_developers.to_string(index=False))
+
+    if not df_outliers.empty:
+        print("\nOutliers (>100K lines - likely generated files):")
+        print(df_outliers.to_string(index=False))
+
     print("\nRepository Details:")
     print(df_repos.to_string(index=False))
 
@@ -911,7 +921,7 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
     else:
         print("Change Failure Rate: No data")
 
-    return df_developers, df_repos
+    return df_developers, df_repos, df_outliers
 
 
 def save_cache(data: dict[str, Any], org: str) -> None:
@@ -983,13 +993,16 @@ def main(
     start_date = end_date - timedelta(days=30 * months)
     since = start_date.isoformat().replace("+00:00", "Z")
 
-    df_developers, df_repos = analyze_data(data, since)
+    df_developers, df_repos, df_outliers = analyze_data(data, since)
 
     # Save CSVs
     df_developers.to_csv(f"{org}_github_developer_metrics.csv", index=False)
     df_repos.to_csv(f"{org}_github_repository_metrics.csv", index=False)
-
-    logger.info("Results saved to %s_github_*.csv", org)
+    if not df_outliers.empty:
+        df_outliers.to_csv(f"{org}_github_outliers.csv", index=False)
+        logger.info("Results saved to %s_github_*.csv (including outliers)", org)
+    else:
+        logger.info("Results saved to %s_github_*.csv", org)
 
 
 def cli() -> None:
