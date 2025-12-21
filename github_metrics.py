@@ -836,12 +836,13 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
             repo_metrics.append(metrics)
 
     # Build DataFrames
-    def format_repos_list(repos_dict: dict[str, int]) -> str:
+    # Build DataFrames
+    def format_repos_list(repos_dict: dict[str, int], limit: int = 5) -> str:
         sorted_repos = sorted(repos_dict.items(), key=lambda x: x[1], reverse=True)
-        if len(sorted_repos) <= 5:
+        if len(sorted_repos) <= limit:
             return ", ".join(r for r, _ in sorted_repos)
-        top_5 = ", ".join(r for r, _ in sorted_repos[:5])
-        return f"{top_5} +{len(sorted_repos) - 5} more"
+        top_n = ", ".join(r for r, _ in sorted_repos[:limit])
+        return f"{top_n} +{len(sorted_repos) - limit} more"
 
     df_developers = pd.DataFrame(
         [
@@ -853,7 +854,8 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
                 "PRs Opened": dev.prs_opened,
                 "PRs Reviewed": dev.prs_reviewed if has_pr_details else "N/A",
                 "PR Comments": dev.pr_comments if has_pr_details else "N/A",
-                "Repositories": format_repos_list(dev.repositories),
+                "Repositories": format_repos_list(dev.repositories, limit=5),
+                "Repositories_Display": format_repos_list(dev.repositories, limit=2),
             }
             for dev in developers.values()
         ]
@@ -903,12 +905,39 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
     logger.info("Average Branch-to-Merge Time: %.2f hours", avg_branch_merge)
 
     pd.set_option("display.max_colwidth", None)
+
+    def print_df(df: pd.DataFrame) -> None:
+        if df.empty:
+            return
+        # Use short repo list for console display
+        df_disp = df.copy()
+        if "Repositories_Display" in df_disp.columns:
+            df_disp["Repositories"] = df_disp["Repositories_Display"]
+            df_disp = df_disp.drop(columns=["Repositories_Display"])
+
+        # Force left alignment for string columns
+        formatters = {}
+        for col in df_disp.columns:
+            if df_disp[col].dtype == "object" or pd.api.types.is_string_dtype(df_disp[col]):
+                max_len = df_disp[col].astype(str).str.len().max()
+                # Determine max length for padding, defaulting to reasonable min
+                max_len = max(max_len, len(col)) if not pd.isna(max_len) else len(col)
+                formatters[col] = f"{{:<{max_len}}}".format
+
+        print(df_disp.to_string(index=False, formatters=formatters))
+
     print("\nDeveloper Activity:")
-    print(df_developers.to_string(index=False))
+    print_df(df_developers)
 
     if not df_outliers.empty:
         print("\nOutliers (>100K lines - likely generated files):")
-        print(df_outliers.to_string(index=False))
+        print_df(df_outliers)
+
+    # Drop display column before returning (so it doesn't go to CSV)
+    if "Repositories_Display" in df_developers.columns:
+        df_developers = df_developers.drop(columns=["Repositories_Display"])
+    if "Repositories_Display" in df_outliers.columns:
+        df_outliers = df_outliers.drop(columns=["Repositories_Display"])
 
     print("\nRepository Details:")
     print(df_repos.to_string(index=False))
