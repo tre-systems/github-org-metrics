@@ -910,11 +910,10 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
     def print_df(df: pd.DataFrame) -> None:
         if df.empty:
             return
-        # Use short repo list for console display
+        # Remove repositories from console display
         df_disp = df.copy()
-        if "Repositories_Display" in df_disp.columns:
-            df_disp["Repositories"] = df_disp["Repositories_Display"]
-            df_disp = df_disp.drop(columns=["Repositories_Display"])
+        cols_to_drop = ["Repositories", "Repositories_Display"]
+        df_disp = df_disp.drop(columns=[c for c in cols_to_drop if c in df_disp.columns])
 
         # Force left alignment for string columns
         formatters = {}
