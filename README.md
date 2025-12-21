@@ -13,6 +13,8 @@ A Python tool to fetch and analyze GitHub organization metrics, including develo
 - Commit counts and code contribution (lines added/deleted)
 - Pull requests opened, reviewed, and commented on
 - Repository contribution breakdown
+- **Smart Filtering**: Automatically excludes bots and inactive users (0 lines changed)
+- **Outlier Detection**: Separates high-volume contributors (>100k lines) into a separate report
 
 ### Repository Metrics
 - Activity levels and commit frequency

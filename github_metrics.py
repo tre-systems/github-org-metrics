@@ -1074,7 +1074,7 @@ def cli() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s my-org                           Analyze top 20 repos from last 3 months
+  %(prog)s my-org                           Analyze all repos from last 3 months
   %(prog)s my-org --months 6                Analyze last 6 months
   %(prog)s my-org --target-repos a b c      Analyze specific repos
   %(prog)s my-org --use-cache               Use cached data
