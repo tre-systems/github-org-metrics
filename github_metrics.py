@@ -858,6 +858,7 @@ def analyze_data(data: dict[str, Any], since: str) -> tuple[pd.DataFrame, pd.Dat
                 "Repositories_Display": format_repos_list(dev.repositories, limit=2),
             }
             for dev in developers.values()
+            if not dev.name.endswith("[bot]")  # Exclude GitHub bots
         ]
     )
     df_developers = df_developers.sort_values("Lines Added", ascending=False)
