@@ -69,7 +69,6 @@ class RepositoryMetrics:
     deployment_count: int = 0
     deployment_failures: int = 0
     failure_rate: float = 0.0
-    avg_recovery_time: float = 0.0
     avg_deployment_duration: float = 0.0
     deployment_durations_count: int = 0
     avg_branch_to_merge_time: float = 0.0
@@ -421,6 +420,7 @@ def fetch_data(
     *,
     fetch_pr_details: bool = True,
     max_prs_per_repo: int = 50,
+    max_repos: int | None = None,
 ) -> dict[str, Any]:
     """Fetch all metrics data for an organization.
 
@@ -431,12 +431,13 @@ def fetch_data(
         target_repos: Optional list of specific repos to analyze.
         fetch_pr_details: If True, fetch per-PR reviews/comments (slow).
         max_prs_per_repo: Maximum number of PRs to process per repository.
+        max_repos: Maximum number of repos to fetch (None for all).
 
     Returns:
         A dictionary containing all fetched data.
     """
     data: dict[str, Any] = {
-        "repos": client.get_org_repos(org, since, target_repos),
+        "repos": client.get_org_repos(org, since, target_repos, max_repos),
         "fetch_pr_details": fetch_pr_details,  # Track whether detailed PR data was fetched
         "commits": {},
         "commit_stats": {},
@@ -511,10 +512,10 @@ def fetch_data(
                 if parse_github_date(pr["created_at"]) >= since_date
                 or parse_github_date(pr["updated_at"]) >= since_date
             ]
-            
+
             # Limit to recent PRs for performance
             recent_prs = recent_prs[:max_prs_per_repo]
-            
+
             total_prs = len(recent_prs)
             logger.info(
                 "Fetching details for %d recent PRs in %s (of %d total)",
@@ -612,38 +613,45 @@ def analyze_data(
     repo_names = [repo["name"] for repo in data["repos"]]
     if not repo_names:
         logger.error("No repositories found to analyze.")
-        
+
         # Return empty DataFrames with proper structure
-        df_developers = pd.DataFrame({
-            'Developer': [],
-            'Commits': [],
-            'Lines Added': [],
-            'Lines Deleted': [],
-            'PRs Opened': [],
-            'PRs Reviewed': [],
-            'PR Comments': [],
-            'Repositories': []
-        })
-        
-        df_repos = pd.DataFrame({
-            'Repository': [],
-            'Commits': [],
-            'PRs': [],
-            'Lead Time (h)': [],
-            'Deploys': [],
-            'Fail %': [],
-            'Deploy (m)': [],
-            'Created': [],
-            'Updated': [],
-            'Language': [],
-            'Branches': [],
-            'Contributors': []
-        })
-        
+        df_developers = pd.DataFrame(
+            {
+                "Developer": [],
+                "Commits": [],
+                "Lines Added": [],
+                "Lines Deleted": [],
+                "PRs Opened": [],
+                "PRs Reviewed": [],
+                "PR Comments": [],
+                "Repositories": [],
+            }
+        )
+
+        df_repos = pd.DataFrame(
+            {
+                "Repository": [],
+                "Commits": [],
+                "PRs": [],
+                "Lead Time (h)": [],
+                "Deploys": [],
+                "Fail %": [],
+                "Deploy (m)": [],
+                "Created": [],
+                "Updated": [],
+                "Language": [],
+                "Branches": [],
+                "Contributors": [],
+            }
+        )
+
         return df_developers, df_repos, pd.DataFrame()
 
     # Check if detailed PR data was fetched
     has_pr_details = data.get("fetch_pr_details", False)
+
+    # Parse the since cutoff once; reused throughout analysis.
+    since_date = datetime.fromisoformat(since.replace("Z", "+00:00"))
 
     # Developer metrics
     developers: dict[str, DeveloperMetrics] = {}
@@ -655,13 +663,11 @@ def analyze_data(
     # PR merge time tracking
     pr_merge_times: list[float] = []
     branch_to_merge_times: list[float] = []
-    repo_branch_to_merge_times: dict[str, list[float]] = defaultdict(list)
 
     # DORA metrics
     repo_deployment_counts: dict[str, int] = defaultdict(int)
     repo_deployment_failures: dict[str, int] = defaultdict(int)
     repo_deployment_durations: dict[str, list[float]] = defaultdict(list)
-    repo_deployment_recovery_times: dict[str, list[float]] = defaultdict(list)
 
     # Detect CI workflows for each repo
     specific_workflows: dict[str, str] = {}
@@ -682,16 +688,14 @@ def analyze_data(
     for repo_name in data.get("pr_reviews", {}):
         if repo_name not in repo_names:
             continue
-        for pr_number, reviews in data["pr_reviews"][repo_name].items():
+        for reviews in data["pr_reviews"][repo_name].values():
             for review in reviews or []:
                 if (
                     review
                     and review.get("user", {}).get("login")
                     and review.get("submitted_at")
                 ):
-                    review_date = parse_github_date(review["submitted_at"])
-                    since_date = datetime.fromisoformat(since.replace("Z", "+00:00"))
-                    if review_date >= since_date:
+                    if parse_github_date(review["submitted_at"]) >= since_date:
                         dev = get_developer(review["user"]["login"])
                         dev.prs_reviewed += 1
 
@@ -699,16 +703,14 @@ def analyze_data(
     for repo_name in data.get("pr_comments", {}):
         if repo_name not in repo_names:
             continue
-        for pr_number, comments in data["pr_comments"][repo_name].items():
+        for comments in data["pr_comments"][repo_name].values():
             for comment in comments or []:
                 if (
                     comment
                     and comment.get("user", {}).get("login")
                     and comment.get("created_at")
                 ):
-                    comment_date = parse_github_date(comment["created_at"])
-                    since_date = datetime.fromisoformat(since.replace("Z", "+00:00"))
-                    if comment_date >= since_date:
+                    if parse_github_date(comment["created_at"]) >= since_date:
                         dev = get_developer(comment["user"]["login"])
                         dev.pr_comments += 1
 
@@ -724,8 +726,6 @@ def analyze_data(
 
         if "workflow_runs" not in workflow_data:
             continue
-
-        since_date = datetime.fromisoformat(since.replace("Z", "+00:00"))
 
         for run in workflow_data["workflow_runs"]:
             if run.get("name", "").lower() != target_workflow:
@@ -754,7 +754,6 @@ def analyze_data(
         branches = data.get("branches", {}).get(repo_name, []) or []
         contributors = data.get("contributors", {}).get(repo_name, []) or []
         durations = repo_deployment_durations.get(repo_name, [])
-        recovery_times = repo_deployment_recovery_times.get(repo_name, [])
 
         metrics = RepositoryMetrics(
             name=repo_name,
@@ -769,9 +768,6 @@ def analyze_data(
             deployment_failures=repo_deployment_failures.get(repo_name, 0),
             avg_deployment_duration=sum(durations) / len(durations) if durations else 0,
             deployment_durations_count=len(durations),
-            avg_recovery_time=sum(recovery_times) / len(recovery_times)
-            if recovery_times
-            else 0,
         )
 
         if metrics.deployment_count > 0:
@@ -801,68 +797,79 @@ def analyze_data(
                         dev.lines_deleted += stats.get("deletions", 0)
                 else:
                     # Debug: Log commits that don't have author login info
-                    commit_author_email = commit.get('commit', {}).get('author', {}).get('email', 'unknown')
-                    commit_author_name = commit.get('commit', {}).get('author', {}).get('name', 'unknown')
-                    logger.debug("Commit %s in %s by %s <%s> has no GitHub login", commit['sha'][:8], repo_name, commit_author_name, commit_author_email)
+                    commit_author_email = (
+                        commit.get("commit", {})
+                        .get("author", {})
+                        .get("email", "unknown")
+                    )
+                    commit_author_name = (
+                        commit.get("commit", {})
+                        .get("author", {})
+                        .get("name", "unknown")
+                    )
+                    logger.debug(
+                        "Commit %s in %s by %s <%s> has no GitHub login",
+                        commit["sha"][:8],
+                        repo_name,
+                        commit_author_name,
+                        commit_author_email,
+                    )
 
-        # Process PRs for merge time tracking
+        # Process PRs: developer attribution, PR count, and branch-to-merge time.
         branch_merge_times_for_repo: list[float] = []
-        since_date = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        pr_count = 0
 
         for pr in data.get("pull_requests", {}).get(repo_name, []):
+            pr_created = parse_github_date(pr["created_at"])
+            pr_updated = parse_github_date(pr["updated_at"])
+
+            if pr_created < since_date and pr_updated < since_date:
+                continue
+
+            pr_count += 1
+
             user = pr.get("user") or {}
             if not user.get("login"):
                 continue
 
-            pr_created = parse_github_date(pr["created_at"])
-            pr_updated = parse_github_date(pr["updated_at"])
+            dev = get_developer(user["login"])
+            dev.repositories[repo_name] = dev.repositories.get(repo_name, 0) + 1
 
-            if pr_created >= since_date or pr_updated >= since_date:
-                dev = get_developer(user["login"])
-                # Track repository for this developer
-                dev.repositories[repo_name] = dev.repositories.get(repo_name, 0) + 1
+            # Only count as "Opened" if actually created in the period
+            if pr_created >= since_date:
+                dev.prs_opened += 1
 
-                # Only count as "Opened" if actually created in the period
+            if pr.get("merged_at"):
+                merged_at = parse_github_date(pr["merged_at"])
+
+                # PR merge time (from open to merge)
                 if pr_created >= since_date:
-                    dev.prs_opened += 1
+                    merge_hours = (merged_at - pr_created).total_seconds() / 3600
+                    if merge_hours <= 30 * 24:  # Filter outliers > 30 days
+                        pr_merge_times.append(merge_hours)
 
-                if pr.get("merged_at"):
-                    merged_at = parse_github_date(pr["merged_at"])
-
-                    # PR merge time
-                    if pr_created >= since_date:
-                        merge_hours = (merged_at - pr_created).total_seconds() / 3600
-                        if merge_hours <= 30 * 24:  # Filter outliers > 30 days
-                            pr_merge_times.append(merge_hours)
-
-                    # Branch to merge time
-                    branch_name = pr.get("head", {}).get("ref")
-                    if branch_name:
-                        first_commit = (
-                            data.get("branch_first_commits", {})
-                            .get(repo_name, {})
-                            .get(branch_name)
-                        )
-                        if first_commit:
-                            commit_date_str = (
-                                first_commit.get("commit", {})
-                                .get("committer", {})
-                                .get("date")
-                            )
-                            if commit_date_str:
-                                branch_start = parse_github_date(commit_date_str)
-                                branch_merge_hours = (
-                                    merged_at - branch_start
-                                ).total_seconds() / 3600
-                                if (
-                                    branch_merge_hours <= 90 * 24
-                                ):  # Filter outliers > 90 days
-                                    branch_to_merge_times.append(branch_merge_hours)
-                                    branch_merge_times_for_repo.append(
-                                        branch_merge_hours
-                                    )
-
-        repo_branch_to_merge_times[repo_name] = branch_merge_times_for_repo
+                # Branch-to-merge time (from first commit to merge)
+                branch_name = pr.get("head", {}).get("ref")
+                if branch_name:
+                    first_commit = (
+                        data.get("branch_first_commits", {})
+                        .get(repo_name, {})
+                        .get(branch_name)
+                    )
+                    commit_date_str = (
+                        (first_commit or {})
+                        .get("commit", {})
+                        .get("committer", {})
+                        .get("date")
+                    )
+                    if commit_date_str:
+                        branch_start = parse_github_date(commit_date_str)
+                        branch_merge_hours = (
+                            merged_at - branch_start
+                        ).total_seconds() / 3600
+                        if branch_merge_hours <= 90 * 24:  # Filter outliers > 90 days
+                            branch_to_merge_times.append(branch_merge_hours)
+                            branch_merge_times_for_repo.append(branch_merge_hours)
 
         if branch_merge_times_for_repo:
             metrics.avg_branch_to_merge_time = sum(branch_merge_times_for_repo) / len(
@@ -871,14 +878,6 @@ def analyze_data(
             metrics.branch_merges_count = len(branch_merge_times_for_repo)
 
         metrics.activity = repo_activity.get(repo_name, 0)
-
-        # Count PRs in time period
-        pr_count = 0
-        for pr in data.get("pull_requests", {}).get(repo_name, []):
-            pr_created = parse_github_date(pr["created_at"])
-            pr_updated = parse_github_date(pr["updated_at"])
-            if pr_created >= since_date or pr_updated >= since_date:
-                pr_count += 1
         metrics.pr_count = pr_count
 
         # Only include repos with activity in the time period
@@ -910,7 +909,7 @@ def analyze_data(
             if not dev.name.endswith("[bot]")  # Exclude GitHub bots
         ]
     )
-    
+
     if not df_developers.empty:
         # Filter developers who did not add/remove code
         df_developers = df_developers[
@@ -921,7 +920,9 @@ def analyze_data(
     # Split outliers (developers with >100K lines added - likely committing generated files)
     OUTLIER_THRESHOLD = 100_000
     if not df_developers.empty:
-        df_outliers = df_developers[df_developers["Lines Added"] > OUTLIER_THRESHOLD].copy()
+        df_outliers = df_developers[
+            df_developers["Lines Added"] > OUTLIER_THRESHOLD
+        ].copy()
         df_developers = df_developers[df_developers["Lines Added"] <= OUTLIER_THRESHOLD]
     else:
         df_outliers = pd.DataFrame()
@@ -977,12 +978,16 @@ def analyze_data(
             )
 
         cols_to_drop = ["Repositories", "Repositories_Display"]
-        df_disp = df_disp.drop(columns=[c for c in cols_to_drop if c in df_disp.columns])
+        df_disp = df_disp.drop(
+            columns=[c for c in cols_to_drop if c in df_disp.columns]
+        )
 
         # Force left alignment for string columns
         formatters = {}
         for col in df_disp.columns:
-            if df_disp[col].dtype == "object" or pd.api.types.is_string_dtype(df_disp[col]):
+            if df_disp[col].dtype == "object" or pd.api.types.is_string_dtype(
+                df_disp[col]
+            ):
                 max_len = df_disp[col].astype(str).str.len().max()
                 max_len = max(max_len, len(col)) if not pd.isna(max_len) else len(col)
                 formatters[col] = f"{{:<{max_len}}}".format
@@ -1051,7 +1056,7 @@ def main(
     months: int,
     token: str,
     *,
-    repos_count: int = 20,
+    max_repos: int | None = None,
     target_repos: list[str] | None = None,
     use_cache: bool = False,
     update_cache: bool = False,
@@ -1065,7 +1070,7 @@ def main(
         org: The GitHub organization name.
         months: Number of months to analyze.
         token: GitHub Personal Access Token.
-        repos_count: Max repos to analyze (if no target specified).
+        max_repos: Max repos to analyze (if no target specified; None for all).
         target_repos: Optional list of specific repos.
         use_cache: Whether to use cached data.
         update_cache: Whether to refresh the cache.
@@ -1093,12 +1098,13 @@ def main(
         logger.info("Fetching data for organization: %s", org)
         client = GitHubAPIClient(token)
         data = fetch_data(
-            client, 
-            org, 
-            since, 
-            target_repos, 
+            client,
+            org,
+            since,
+            target_repos,
             fetch_pr_details=fetch_pr_details,
-            max_prs_per_repo=max_prs_per_repo
+            max_prs_per_repo=max_prs_per_repo,
+            max_repos=max_repos,
         )
         save_cache(data, org)
 
@@ -1107,7 +1113,9 @@ def main(
     start_date = end_date - timedelta(days=30 * months)
     since = start_date.isoformat().replace("+00:00", "Z")
 
-    df_developers, df_repos, df_outliers = analyze_data(data, since, anonymize=anonymize)
+    df_developers, df_repos, df_outliers = analyze_data(
+        data, since, anonymize=anonymize
+    )
 
     # Save CSVs
     df_developers.to_csv(f"{org}_github_developer_metrics.csv", index=False)
@@ -1138,7 +1146,10 @@ Examples:
         "--months", type=int, default=3, help="Months to analyze (default: 3)"
     )
     parser.add_argument(
-        "--repos", type=int, default=20, help="Number of top repositories to analyze when no specific repos are targeted (default: 20)"
+        "--repos",
+        type=int,
+        default=None,
+        help="Limit to the top N most recently pushed repositories (default: all)",
     )
     parser.add_argument("--target-repos", nargs="+", help="Specific repos to analyze")
     parser.add_argument("--use-cache", action="store_true", help="Use cached data")
@@ -1155,7 +1166,10 @@ Examples:
         help="Anonymize developer names in console output (for screenshots)",
     )
     parser.add_argument(
-        "--max-prs", type=int, default=50, help="Maximum number of PRs to process per repository (default: 50)"
+        "--max-prs",
+        type=int,
+        default=50,
+        help="Maximum number of PRs to process per repository (default: 50)",
     )
 
     args = parser.parse_args()
@@ -1183,7 +1197,7 @@ Examples:
         args.org,
         args.months,
         token,
-        repos_count=args.repos,
+        max_repos=args.repos,
         target_repos=args.target_repos,
         use_cache=args.use_cache,
         update_cache=args.update_cache,
