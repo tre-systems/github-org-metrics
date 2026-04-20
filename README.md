@@ -2,9 +2,9 @@
 
 A command-line tool that pulls a GitHub organization's recent activity from the REST API and turns it into three things reviewers actually look at: a per-developer contribution report, a per-repository health report, and CSVs you can paste into a spreadsheet.
 
+[![CI](https://github.com/rgilks/github-org-metrics/actions/workflows/ci.yml/badge.svg)](https://github.com/rgilks/github-org-metrics/actions/workflows/ci.yml)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
-![Tests: passing](https://img.shields.io/badge/tests-44%20passing-brightgreen.svg)
 
 ![Dashboard screenshot](screenshot.png)
 
@@ -114,6 +114,7 @@ github-metrics <org> [options]
 | `--fast`           | Skip per-PR reviews/comments (far fewer API calls)                          | off     |
 | `--anonymize`      | Anonymize developer names **in the console only** (CSVs keep real names)   | off     |
 | `--max-prs N`      | Cap on recent PRs hydrated with review/comment detail                       | `50`    |
+| `--workers N`      | Thread-pool size for per-commit stats fetches                               | `10`    |
 | `--output-dir DIR` | Directory for the cache and CSVs                                            | cwd     |
 | `-v, --verbose`    | Debug logging                                                               | off     |
 | `--version`        | Print version and exit                                                      | –       |
@@ -208,15 +209,22 @@ If you don't need review/comment attribution, `--fast` skips the per-PR hydratio
 ## Development
 
 ```bash
-# Run the test suite (44 tests, no network)
-uv run pytest
-
-# Lint
-uv run ruff check .
-
-# Format
-uv run ruff format .
+uv run pytest               # test suite, no network
+uv run ruff check .         # lint
+uv run ruff format .        # format
+uv run mypy                 # type check
 ```
+
+**Pre-commit hooks** — optional but recommended:
+
+```bash
+uv tool install pre-commit
+pre-commit install
+```
+
+This runs `ruff` (check + format) and basic file-hygiene hooks on every commit. The heavier checks (`mypy`, `pytest`) run in CI.
+
+**CI** — every push and PR triggers `.github/workflows/ci.yml`, which runs lint, format check, type check, and the full test suite on Python 3.12.
 
 The codebase is laid out as a small package:
 

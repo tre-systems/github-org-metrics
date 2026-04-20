@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -25,6 +26,7 @@ def test_parser_defaults_match_expectations():
     assert args.fast is False
     assert args.anonymize is False
     assert args.max_prs == 50
+    assert args.workers == 10
 
 
 def test_parser_accepts_target_repos_as_list():
@@ -71,3 +73,17 @@ def test_print_dataframe_anonymizes_developer_column(capsys):
     output = capsys.readouterr().out
     assert "alice" not in output
     assert "user-" in output
+
+
+def test_load_cache_warns_on_schema_mismatch(tmp_path: Path, caplog):
+    (tmp_path / "my-org_github_data_cache.json").write_text('{"_schema": 1, "repos": []}')
+
+    with caplog.at_level(logging.WARNING, logger="github_metrics.cli"):
+        data = load_cache("my-org", tmp_path)
+    assert data is not None
+    assert any("schema" in record.message for record in caplog.records)
+
+
+def test_parser_accepts_workers():
+    args = build_parser().parse_args(["org", "--workers", "4"])
+    assert args.workers == 4

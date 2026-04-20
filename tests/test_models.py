@@ -19,6 +19,13 @@ def test_parse_github_date_returns_utc_aware():
     assert dt.tzinfo is not None
 
 
+def test_parse_github_date_accepts_microseconds():
+    """Our own `iso_since()` emits microsecond-precision strings; must parse."""
+    dt = parse_github_date("2025-04-20T12:34:56.789012Z")
+    assert dt.microsecond == 789012
+    assert dt.tzinfo is not None
+
+
 def test_format_date_for_display_uses_ddmmyy():
     assert format_date_for_display("2025-04-20T00:00:00Z") == "20/04/25"
 

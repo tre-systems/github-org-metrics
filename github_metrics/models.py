@@ -5,12 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-GITHUB_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-
 
 def parse_github_date(date_str: str) -> datetime:
-    """Parse an ISO-8601 date string from the GitHub API to UTC datetime."""
-    return datetime.strptime(date_str, GITHUB_DATE_FORMAT).replace(tzinfo=UTC)
+    """Parse an ISO-8601 date string to a UTC-aware `datetime`.
+
+    Accepts GitHub's second-precision format (`...Z`) and the
+    microsecond-precision strings produced by our own `iso_since()`
+    (which come from `datetime.now(UTC).isoformat()`).
+    """
+    return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
 
 
 def format_date_for_display(date_str: str) -> str:

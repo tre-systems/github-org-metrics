@@ -87,7 +87,8 @@ def detect_ci_workflow(runs: list[dict[str, Any]]) -> str | None:
     ci_keywords = ("ci", "test", "build", "deploy")
     ci_names = [n for n in names if any(kw in n for kw in ci_keywords)]
     counter = Counter(ci_names or names)
-    return counter.most_common(1)[0][0]
+    name: str = counter.most_common(1)[0][0]
+    return name
 
 
 def compute_dora_for_repo(

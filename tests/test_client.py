@@ -131,3 +131,51 @@ def test_get_commit_stats_returns_stats_dict(client):
 def test_get_commit_stats_handles_missing_stats(client):
     with patch.object(client, "_get", return_value={"sha": "abc"}):
         assert client.get_commit_stats("o", "r", "abc") is None
+
+
+# ------------------------------------------------------------------- Link header
+
+
+def test_link_url_for_rel_parses_last():
+    header = (
+        '<https://api.github.com/x?page=2>; rel="next", '
+        '<https://api.github.com/x?page=9>; rel="last"'
+    )
+    assert GitHubAPIClient._link_url_for_rel(header, "last") == "https://api.github.com/x?page=9"
+
+
+def test_link_url_for_rel_returns_none_for_missing():
+    assert GitHubAPIClient._link_url_for_rel(None, "last") is None
+    assert GitHubAPIClient._link_url_for_rel("", "last") is None
+    assert GitHubAPIClient._link_url_for_rel('<x>; rel="first"', "last") is None
+
+
+def test_get_branch_commits_single_page_returns_last_item(client):
+    first_page = [{"sha": "c1"}, {"sha": "c2"}, {"sha": "c3"}]
+    response = Mock(status_code=200, headers={}, text="", json=Mock(return_value=first_page))
+    with patch.object(client, "_request", return_value=response):
+        assert client.get_branch_commits("o", "r", "main") == {"sha": "c3"}
+
+
+def test_get_branch_commits_follows_link_to_last_page(client):
+    first_page = [{"sha": f"c{i}"} for i in range(PAGE_SIZE)]
+    link = '<https://api.github.com/x?page=3>; rel="last"'
+    response = Mock(
+        status_code=200,
+        headers={"Link": link},
+        text="",
+        json=Mock(return_value=first_page),
+    )
+    last_page = [{"sha": "oldest"}]
+    with (
+        patch.object(client, "_request", return_value=response),
+        patch.object(client, "_get", return_value=last_page) as mock_get,
+    ):
+        result = client.get_branch_commits("o", "r", "main")
+    assert result == {"sha": "oldest"}
+    mock_get.assert_called_once_with("https://api.github.com/x?page=3")
+
+
+def test_get_branch_commits_returns_none_when_request_fails(client):
+    with patch.object(client, "_request", return_value=None):
+        assert client.get_branch_commits("o", "r", "main") is None

@@ -29,12 +29,32 @@ packages = ["github_metrics"]
 dev = [
     "ruff>=0.8.0",
     "pytest>=8.0",
+    "mypy>=1.11",
+    "types-requests>=2.31",
+    "pandas-stubs>=2.2",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 filterwarnings = ["error"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["github_metrics", "tests"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
 
 [tool.ruff]
 line-length = 100

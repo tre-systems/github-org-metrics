@@ -16,7 +16,7 @@ import pandas as pd
 from github_metrics import __version__
 from github_metrics.analyze import analyze
 from github_metrics.client import GitHubAPIClient
-from github_metrics.fetch import fetch_data
+from github_metrics.fetch import DATA_SCHEMA_VERSION, DEFAULT_COMMIT_STATS_WORKERS, fetch_data
 from github_metrics.models import iso_since
 
 CACHE_FILE_SUFFIX = "_github_data_cache.json"
@@ -48,7 +48,17 @@ def load_cache(org: str, output_dir: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     with path.open() as fh:
-        return json.load(fh)
+        data: dict[str, Any] = json.load(fh)
+    schema = data.get("_schema", 1)
+    if schema != DATA_SCHEMA_VERSION:
+        logger.warning(
+            "Cache at %s has schema v%s; this version expects v%s. "
+            "Analysis may be incomplete; run with --update-cache to refresh.",
+            path,
+            schema,
+            DATA_SCHEMA_VERSION,
+        )
+    return data
 
 
 # -------------------------------------------------------------------- display
@@ -92,6 +102,7 @@ def run(
     fetch_pr_details: bool = True,
     anonymize: bool = False,
     max_prs_per_repo: int = 50,
+    workers: int = DEFAULT_COMMIT_STATS_WORKERS,
     output_dir: Path | None = None,
 ) -> None:
     """Fetch/analyze metrics for `org` and emit CSVs + a console report."""
@@ -120,6 +131,7 @@ def run(
             fetch_pr_details=fetch_pr_details,
             max_prs_per_repo=max_prs_per_repo,
             max_repos=max_repos,
+            commit_stats_workers=workers,
         )
         save_cache(data, org, output_dir)
 
@@ -204,6 +216,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cap on recent PRs to hydrate with review/comment details (default: 50)",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_COMMIT_STATS_WORKERS,
+        metavar="N",
+        help=(
+            "Thread-pool size for per-commit stats fetches "
+            f"(default: {DEFAULT_COMMIT_STATS_WORKERS}). "
+            "Lower to reduce rate-limit pressure on large orgs."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -248,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         fetch_pr_details=not args.fast,
         anonymize=args.anonymize,
         max_prs_per_repo=args.max_prs,
+        workers=args.workers,
         output_dir=args.output_dir,
     )
     return 0

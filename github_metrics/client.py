@@ -40,8 +40,8 @@ class GitHubAPIClient:
 
     # ------------------------------------------------------------------ core
 
-    def _get(self, url: str) -> Any | None:
-        """GET `url`; return decoded JSON, or `None` for permanent failures."""
+    def _request(self, url: str) -> requests.Response | None:
+        """GET `url`, retrying on rate-limit. Returns the Response or None."""
         while True:
             try:
                 response = self._session.get(url, timeout=self._timeout)
@@ -50,7 +50,7 @@ class GitHubAPIClient:
                 return None
 
             if response.status_code == 200:
-                return response.json()
+                return response
 
             if (
                 response.status_code == 403
@@ -72,6 +72,23 @@ class GitHubAPIClient:
 
             logger.error("GET %s -> %d: %s", url, response.status_code, response.text[:200])
             return None
+
+    def _get(self, url: str) -> Any | None:
+        """GET `url`; return decoded JSON, or `None` for permanent failures."""
+        response = self._request(url)
+        return response.json() if response is not None else None
+
+    @staticmethod
+    def _link_url_for_rel(link_header: str | None, rel: str) -> str | None:
+        """Return the URL for `rel` from a GitHub Link header, if present."""
+        if not link_header:
+            return None
+        for link in requests.utils.parse_header_links(link_header):
+            if link.get("rel") == rel:
+                url = link.get("url")
+                if isinstance(url, str):
+                    return url
+        return None
 
     def _paginate(
         self,
@@ -169,19 +186,31 @@ class GitHubAPIClient:
         return None
 
     def get_branch_commits(self, org: str, repo: str, branch: str) -> dict[str, Any] | None:
-        """Return the oldest commit from the first page reachable from `branch`.
+        """Return the oldest commit reachable from `branch`.
 
-        This is an approximation of "first commit on the branch" and is only
-        accurate when the branch has ≤100 commits; long-lived branches will
-        see an oldest-commit estimate that's still useful for DORA lead-time
-        bucketing.
+        GitHub's commits endpoint returns newest-first, so the oldest is the
+        last item on the last page. We follow the `Link: rel="last"` header
+        to jump straight there — one extra request for branches with >100
+        commits, zero extras for shorter branches.
         """
-        commits = self._get(
+        first = self._request(
             f"{GITHUB_API_URL}/repos/{org}/{repo}/commits?sha={branch}&per_page={PAGE_SIZE}"
         )
-        if isinstance(commits, list) and commits:
+        if first is None:
+            return None
+        commits: list[dict[str, Any]] = first.json()
+        if not isinstance(commits, list) or not commits:
+            return None
+
+        last_url = self._link_url_for_rel(first.headers.get("Link"), "last")
+        if last_url is None:
             return commits[-1]
-        return None
+
+        last_page = self._get(last_url)
+        if isinstance(last_page, list) and last_page:
+            oldest: dict[str, Any] = last_page[-1]
+            return oldest
+        return commits[-1]
 
     # Pull requests ----------------------------------------------------------
 

@@ -85,9 +85,10 @@ def fetch_data(
         "workflow_runs": {},
     }
 
-    for repo in data["repos"]:
+    total_repos = len(data["repos"])
+    for idx, repo in enumerate(data["repos"], start=1):
         name = repo["name"]
-        logger.info("Fetching data for %s", name)
+        logger.info("[%d/%d] Fetching data for %s", idx, total_repos, name)
 
         commits = client.get_commits(org, name, since)
         data["commits"][name] = commits
