@@ -133,6 +133,41 @@ def test_get_commit_stats_handles_missing_stats(client):
         assert client.get_commit_stats("o", "r", "abc") is None
 
 
+def test_get_pull_request_commits_uses_pagination(client):
+    with patch.object(client, "_paginate", return_value=[{"sha": "abc"}]) as mock_paginate:
+        result = client.get_pull_request_commits("o", "r", 7)
+    assert result == [{"sha": "abc"}]
+    mock_paginate.assert_called_once_with("https://api.github.com/repos/o/r/pulls/7/commits")
+
+
+def test_get_pull_request_reviews_uses_pagination(client):
+    with patch.object(client, "_paginate", return_value=[{"id": 1}]) as mock_paginate:
+        result = client.get_pull_request_reviews("o", "r", 7)
+    assert result == [{"id": 1}]
+    mock_paginate.assert_called_once_with("https://api.github.com/repos/o/r/pulls/7/reviews")
+
+
+def test_get_pull_request_comments_uses_pagination(client):
+    with patch.object(client, "_paginate", return_value=[{"id": 1}]) as mock_paginate:
+        result = client.get_pull_request_comments("o", "r", 7)
+    assert result == [{"id": 1}]
+    mock_paginate.assert_called_once_with("https://api.github.com/repos/o/r/pulls/7/comments")
+
+
+def test_get_branches_uses_pagination(client):
+    with patch.object(client, "_paginate", return_value=[{"name": "main"}]) as mock_paginate:
+        result = client.get_branches("o", "r")
+    assert result == [{"name": "main"}]
+    mock_paginate.assert_called_once_with("https://api.github.com/repos/o/r/branches")
+
+
+def test_get_contributors_uses_pagination(client):
+    with patch.object(client, "_paginate", return_value=[{"login": "alice"}]) as mock_paginate:
+        result = client.get_contributors("o", "r")
+    assert result == [{"login": "alice"}]
+    mock_paginate.assert_called_once_with("https://api.github.com/repos/o/r/contributors")
+
+
 # ------------------------------------------------------------------- Link header
 
 

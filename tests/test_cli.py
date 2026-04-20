@@ -12,6 +12,7 @@ import pytest
 from github_metrics.cli import (
     build_parser,
     load_cache,
+    main,
     print_dataframe,
     save_cache,
 )
@@ -87,3 +88,26 @@ def test_load_cache_warns_on_schema_mismatch(tmp_path: Path, caplog):
 def test_parser_accepts_workers():
     args = build_parser().parse_args(["org", "--workers", "4"])
     assert args.workers == 4
+
+
+def test_main_does_not_log_token_value(monkeypatch, caplog):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_super_secret_token")
+
+    captured: dict[str, object] = {}
+
+    def fake_run(org, months, token, **kwargs):
+        captured["org"] = org
+        captured["months"] = months
+        captured["token"] = token
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr("github_metrics.cli.run", fake_run)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = main(["my-org"])
+
+    assert exit_code == 0
+    assert captured["token"] == "ghp_super_secret_token"
+    messages = [record.message for record in caplog.records]
+    assert any("GitHub token detected" in message for message in messages)
+    assert all("ghp_super_secret_token" not in message for message in messages)

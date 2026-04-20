@@ -264,6 +264,29 @@ def test_analyze_counts_pr_reviews_and_comments_from_payload():
     assert alice["PR Comments"] == 1
 
 
+def test_analyze_keeps_review_only_contributors():
+    data = _empty_repo_data("r")
+    data["pull_requests"]["r"] = [
+        _pr(
+            1,
+            "alice",
+            created="2025-02-01T00:00:00Z",
+            updated="2025-02-02T00:00:00Z",
+            merged="2025-02-03T00:00:00Z",
+        )
+    ]
+    data["pr_reviews"]["r"] = {
+        1: [{"user": {"login": "reviewer"}, "submitted_at": "2025-02-04T00:00:00Z"}]
+    }
+
+    devs, _, _ = analyze(data, SINCE)
+
+    reviewer = devs[devs["Developer"] == "reviewer"].iloc[0]
+    assert reviewer["Commits"] == 0
+    assert reviewer["PRs Reviewed"] == 1
+    assert reviewer["PR Comments"] == 0
+
+
 def test_analyze_repository_df_has_expected_columns():
     data = _empty_repo_data("r")
     data["commits"]["r"] = [_commit("sha1", "alice", "2025-02-01T00:00:00Z")]

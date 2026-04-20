@@ -252,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    logger.info("Token: %s…%s", token[:4], token[-4:])
+    logger.info("GitHub token detected in environment.")
     logger.info("Organization: %s", args.org)
     logger.info("Window: last %d month(s)", args.months)
     if args.target_repos:

@@ -219,25 +219,24 @@ class GitHubAPIClient:
         logger.info("Pull requests for %s: %d", repo, len(prs))
         return prs
 
+    def get_pull_request_commits(self, org: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+        return self._paginate(f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls/{pr_number}/commits")
+
     def get_pull_request_reviews(self, org: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
-        result = self._get(f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls/{pr_number}/reviews")
-        return result if isinstance(result, list) else []
+        return self._paginate(f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls/{pr_number}/reviews")
 
     def get_pull_request_comments(
         self, org: str, repo: str, pr_number: int
     ) -> list[dict[str, Any]]:
-        result = self._get(f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls/{pr_number}/comments")
-        return result if isinstance(result, list) else []
+        return self._paginate(f"{GITHUB_API_URL}/repos/{org}/{repo}/pulls/{pr_number}/comments")
 
     # Repo meta --------------------------------------------------------------
 
     def get_branches(self, org: str, repo: str) -> list[dict[str, Any]]:
-        result = self._get(f"{GITHUB_API_URL}/repos/{org}/{repo}/branches")
-        return result if isinstance(result, list) else []
+        return self._paginate(f"{GITHUB_API_URL}/repos/{org}/{repo}/branches")
 
     def get_contributors(self, org: str, repo: str) -> list[dict[str, Any]]:
-        result = self._get(f"{GITHUB_API_URL}/repos/{org}/{repo}/contributors")
-        return result if isinstance(result, list) else []
+        return self._paginate(f"{GITHUB_API_URL}/repos/{org}/{repo}/contributors")
 
     # Workflow runs ----------------------------------------------------------
 

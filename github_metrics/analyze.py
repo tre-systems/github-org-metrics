@@ -368,12 +368,18 @@ def _build_developer_dataframes(
         }
         for dev in developers.values()
         if not dev.name.endswith("[bot]")
+        and (
+            dev.lines_added > 0
+            or dev.lines_deleted > 0
+            or dev.prs_opened > 0
+            or dev.prs_reviewed > 0
+            or dev.pr_comments > 0
+        )
     ]
     df = pd.DataFrame(rows, columns=DEVELOPER_COLUMNS)
     if df.empty:
         return df, pd.DataFrame(columns=DEVELOPER_COLUMNS)
 
-    df = df[(df["Lines Added"] > 0) | (df["Lines Deleted"] > 0)]
     df = df.sort_values("Lines Added", ascending=False)
 
     outliers = df[df["Lines Added"] > OUTLIER_LINE_THRESHOLD].copy()

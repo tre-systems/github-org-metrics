@@ -12,7 +12,22 @@ from github_metrics.models import parse_github_date
 logger = logging.getLogger(__name__)
 
 DEFAULT_COMMIT_STATS_WORKERS = 10
-DATA_SCHEMA_VERSION = 2  # Bumped when `fetch_data` output shape changes.
+DATA_SCHEMA_VERSION = 3  # Bumped when `fetch_data` output shape changes or semantics change.
+
+
+def _first_commit_date_from_pr(commits: list[dict[str, Any]]) -> str | None:
+    """Return the earliest commit timestamp available from a PR commits payload."""
+    valid_dates: list[str] = []
+    for commit in commits:
+        metadata = commit.get("commit") or {}
+        date = (metadata.get("committer") or {}).get("date") or (metadata.get("author") or {}).get(
+            "date"
+        )
+        if isinstance(date, str):
+            valid_dates.append(date)
+    if not valid_dates:
+        return None
+    return min(valid_dates, key=parse_github_date)
 
 
 def _fetch_commit_stats(
@@ -132,12 +147,15 @@ def _hydrate_pr_details(
     all_prs = data["pull_requests"][repo]
 
     if not fetch_pr_details:
-        # Fast mode: skip per-PR calls, approximate branch start from PR open.
+        # Fast mode still fetches PR commits for merged PRs so branch timing remains accurate.
         for pr in all_prs:
             if pr.get("merged_at") and pr.get("head", {}).get("ref"):
-                data["branch_first_commits"][repo][pr["head"]["ref"]] = {
-                    "commit": {"committer": {"date": pr["created_at"]}}
-                }
+                commits = client.get_pull_request_commits(org, repo, pr["number"])
+                first_commit_date = _first_commit_date_from_pr(commits)
+                if first_commit_date:
+                    data["branch_first_commits"][repo][pr["head"]["ref"]] = {
+                        "commit": {"committer": {"date": first_commit_date}}
+                    }
         return
 
     since_date = parse_github_date(since)
@@ -163,12 +181,14 @@ def _hydrate_pr_details(
         branch = pr.get("head", {}).get("ref")
         if not branch:
             continue
-        if pr.get("state") == "open":
-            data["branch_first_commits"][repo][branch] = client.get_branch_commits(
-                org, repo, branch
-            )
-        elif pr.get("merged_at"):
-            # Merged PRs: approximate branch start from PR open time.
+        if pr.get("merged_at"):
+            commits = client.get_pull_request_commits(org, repo, number)
+            first_commit_date = _first_commit_date_from_pr(commits)
+            if first_commit_date:
+                data["branch_first_commits"][repo][branch] = {
+                    "commit": {"committer": {"date": first_commit_date}}
+                }
+        elif pr.get("state") == "open":
             data["branch_first_commits"][repo][branch] = {
                 "commit": {"committer": {"date": pr["created_at"]}}
             }
