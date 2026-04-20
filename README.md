@@ -199,6 +199,10 @@ Data is cached to `<org>_github_data_cache.json` (or inside `--output-dir`).
 - `--update-cache` re-fetches and overwrites.
 - Useful when iterating on analysis, demoing offline, or working around rate limits.
 - The cache is raw API data; it's big but perfectly diffable.
+- The cache file includes an internal `_schema` version. That version tracks the shape and meaning of cached fields, not just the filename.
+- If you upgrade the tool and your cache was written by an older version, the CLI will warn when the `_schema` does not match the current expected version.
+- Schema mismatches are treated as a best-effort fallback for inspection only: some analysis may still run, but newer metrics can be incomplete or interpreted differently.
+- When in doubt after upgrading, prefer `--update-cache` to rebuild the cache before trusting the output.
 
 ## Performance
 
