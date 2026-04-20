@@ -420,6 +420,7 @@ def fetch_data(
     target_repos: list[str] | None = None,
     *,
     fetch_pr_details: bool = True,
+    max_prs_per_repo: int = 50,
 ) -> dict[str, Any]:
     """Fetch all metrics data for an organization.
 
@@ -429,6 +430,7 @@ def fetch_data(
         since: ISO format date string.
         target_repos: Optional list of specific repos to analyze.
         fetch_pr_details: If True, fetch per-PR reviews/comments (slow).
+        max_prs_per_repo: Maximum number of PRs to process per repository.
 
     Returns:
         A dictionary containing all fetched data.
@@ -509,6 +511,10 @@ def fetch_data(
                 if parse_github_date(pr["created_at"]) >= since_date
                 or parse_github_date(pr["updated_at"]) >= since_date
             ]
+            
+            # Limit to recent PRs for performance
+            recent_prs = recent_prs[:max_prs_per_repo]
+            
             total_prs = len(recent_prs)
             logger.info(
                 "Fetching details for %d recent PRs in %s (of %d total)",
@@ -597,10 +603,45 @@ def analyze_data(
     Args:
         data: The data dictionary from fetch_data().
         since: ISO format date string for filtering.
+        anonymize: Whether to anonymize developer names.
 
     Returns:
-        A tuple of (developer_metrics_df, repository_metrics_df).
+        A tuple of (developer_metrics_df, repository_metrics_df, outliers_df).
     """
+    # Check if we have any repositories to analyze
+    repo_names = [repo["name"] for repo in data["repos"]]
+    if not repo_names:
+        logger.error("No repositories found to analyze.")
+        
+        # Return empty DataFrames with proper structure
+        df_developers = pd.DataFrame({
+            'Developer': [],
+            'Commits': [],
+            'Lines Added': [],
+            'Lines Deleted': [],
+            'PRs Opened': [],
+            'PRs Reviewed': [],
+            'PR Comments': [],
+            'Repositories': []
+        })
+        
+        df_repos = pd.DataFrame({
+            'Repository': [],
+            'Commits': [],
+            'PRs': [],
+            'Lead Time (h)': [],
+            'Deploys': [],
+            'Fail %': [],
+            'Deploy (m)': [],
+            'Created': [],
+            'Updated': [],
+            'Language': [],
+            'Branches': [],
+            'Contributors': []
+        })
+        
+        return df_developers, df_repos, pd.DataFrame()
+
     # Check if detailed PR data was fetched
     has_pr_details = data.get("fetch_pr_details", False)
 
@@ -621,8 +662,6 @@ def analyze_data(
     repo_deployment_failures: dict[str, int] = defaultdict(int)
     repo_deployment_durations: dict[str, list[float]] = defaultdict(list)
     repo_deployment_recovery_times: dict[str, list[float]] = defaultdict(list)
-
-    repo_names = [repo["name"] for repo in data["repos"]]
 
     # Detect CI workflows for each repo
     specific_workflows: dict[str, str] = {}
@@ -760,6 +799,11 @@ def analyze_data(
                     if stats:
                         dev.lines_added += stats.get("additions", 0)
                         dev.lines_deleted += stats.get("deletions", 0)
+                else:
+                    # Debug: Log commits that don't have author login info
+                    commit_author_email = commit.get('commit', {}).get('author', {}).get('email', 'unknown')
+                    commit_author_name = commit.get('commit', {}).get('author', {}).get('name', 'unknown')
+                    logger.debug("Commit %s in %s by %s <%s> has no GitHub login", commit['sha'][:8], repo_name, commit_author_name, commit_author_email)
 
         # Process PRs for merge time tracking
         branch_merge_times_for_repo: list[float] = []
@@ -842,7 +886,6 @@ def analyze_data(
             repo_metrics.append(metrics)
 
     # Build DataFrames
-    # Build DataFrames
     def format_repos_list(repos_dict: dict[str, int], limit: int = 5) -> str:
         sorted_repos = sorted(repos_dict.items(), key=lambda x: x[1], reverse=True)
         if len(sorted_repos) <= limit:
@@ -868,17 +911,20 @@ def analyze_data(
         ]
     )
     
-    # Filter developers who did not add/remove code (as requested: "did not add or remove code")
-    df_developers = df_developers[
-        (df_developers["Lines Added"] > 0) | (df_developers["Lines Deleted"] > 0)
-    ]
-
-    df_developers = df_developers.sort_values("Lines Added", ascending=False)
+    if not df_developers.empty:
+        # Filter developers who did not add/remove code
+        df_developers = df_developers[
+            (df_developers["Lines Added"] > 0) | (df_developers["Lines Deleted"] > 0)
+        ]
+        df_developers = df_developers.sort_values("Lines Added", ascending=False)
 
     # Split outliers (developers with >100K lines added - likely committing generated files)
     OUTLIER_THRESHOLD = 100_000
-    df_outliers = df_developers[df_developers["Lines Added"] > OUTLIER_THRESHOLD].copy()
-    df_developers = df_developers[df_developers["Lines Added"] <= OUTLIER_THRESHOLD]
+    if not df_developers.empty:
+        df_outliers = df_developers[df_developers["Lines Added"] > OUTLIER_THRESHOLD].copy()
+        df_developers = df_developers[df_developers["Lines Added"] <= OUTLIER_THRESHOLD]
+    else:
+        df_outliers = pd.DataFrame()
 
     df_repos = pd.DataFrame(
         [
@@ -899,7 +945,8 @@ def analyze_data(
             for m in repo_metrics
         ]
     )
-    df_repos = df_repos.sort_values("Commits", ascending=False)
+    if not df_repos.empty:
+        df_repos = df_repos.sort_values("Commits", ascending=False)
 
     # Print results
     avg_pr_merge = sum(pr_merge_times) / len(pr_merge_times) if pr_merge_times else 0
@@ -922,7 +969,6 @@ def analyze_data(
     def print_df(df: pd.DataFrame) -> None:
         if df.empty:
             return
-        # Remove repositories from console display
         df_disp = df.copy()
 
         if anonymize and "Developer" in df_disp.columns:
@@ -938,7 +984,6 @@ def analyze_data(
         for col in df_disp.columns:
             if df_disp[col].dtype == "object" or pd.api.types.is_string_dtype(df_disp[col]):
                 max_len = df_disp[col].astype(str).str.len().max()
-                # Determine max length for padding, defaulting to reasonable min
                 max_len = max(max_len, len(col)) if not pd.isna(max_len) else len(col)
                 formatters[col] = f"{{:<{max_len}}}".format
 
@@ -954,7 +999,7 @@ def analyze_data(
     # Drop display column before returning (so it doesn't go to CSV)
     if "Repositories_Display" in df_developers.columns:
         df_developers = df_developers.drop(columns=["Repositories_Display"])
-    if "Repositories_Display" in df_outliers.columns:
+    if not df_outliers.empty and "Repositories_Display" in df_outliers.columns:
         df_outliers = df_outliers.drop(columns=["Repositories_Display"])
 
     print("\nRepository Details:")
@@ -1012,6 +1057,7 @@ def main(
     update_cache: bool = False,
     fetch_pr_details: bool = True,
     anonymize: bool = False,
+    max_prs_per_repo: int = 50,
 ) -> None:
     """Main entry point for the GitHub metrics script.
 
@@ -1025,6 +1071,7 @@ def main(
         update_cache: Whether to refresh the cache.
         fetch_pr_details: If True, fetch per-PR reviews/comments (slow).
         anonymize: If True, anonymize names in console output.
+        max_prs_per_repo: Max PRs to process per repo.
     """
     data: dict[str, Any] | None = None
 
@@ -1046,7 +1093,12 @@ def main(
         logger.info("Fetching data for organization: %s", org)
         client = GitHubAPIClient(token)
         data = fetch_data(
-            client, org, since, target_repos, fetch_pr_details=fetch_pr_details
+            client, 
+            org, 
+            since, 
+            target_repos, 
+            fetch_pr_details=fetch_pr_details,
+            max_prs_per_repo=max_prs_per_repo
         )
         save_cache(data, org)
 
@@ -1086,7 +1138,7 @@ Examples:
         "--months", type=int, default=3, help="Months to analyze (default: 3)"
     )
     parser.add_argument(
-        "--repos", type=int, default=None, help="Limit repos to analyze (default: all)"
+        "--repos", type=int, default=20, help="Number of top repositories to analyze when no specific repos are targeted (default: 20)"
     )
     parser.add_argument("--target-repos", nargs="+", help="Specific repos to analyze")
     parser.add_argument("--use-cache", action="store_true", help="Use cached data")
@@ -1101,6 +1153,9 @@ Examples:
         "--anonymize",
         action="store_true",
         help="Anonymize developer names in console output (for screenshots)",
+    )
+    parser.add_argument(
+        "--max-prs", type=int, default=50, help="Maximum number of PRs to process per repository (default: 50)"
     )
 
     args = parser.parse_args()
@@ -1134,6 +1189,7 @@ Examples:
         update_cache=args.update_cache,
         fetch_pr_details=not args.fast,
         anonymize=args.anonymize,
+        max_prs_per_repo=args.max_prs,
     )
 
 
