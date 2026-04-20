@@ -1,15 +1,61 @@
 [project]
 name = "github-org-metrics"
-version = "0.1.0"
-description = "Fetch and analyze GitHub organization metrics including DORA metrics"
+version = "1.0.0"
+description = "Fetch and analyze GitHub organization metrics, including DORA-adjacent signals."
 readme = "README.md"
 requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "rgilks" }]
 dependencies = [
     "requests>=2.31.0",
     "pandas>=2.0.3",
 ]
 
+[project.scripts]
+github-metrics = "github_metrics.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/rgilks/github-org-metrics"
+Issues = "https://github.com/rgilks/github-org-metrics/issues"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["github_metrics"]
+
 [dependency-groups]
 dev = [
     "ruff>=0.8.0",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RET", # flake8-return
+    "PL",  # pylint
+    "RUF", # ruff-specific
+]
+ignore = [
+    "PLR0913", # too-many-arguments
+    "PLR0912", # too-many-branches
+    "PLR0915", # too-many-statements
+    "PLR2004", # magic-value-comparison
 ]
