@@ -163,6 +163,8 @@ api = "Release"
 web = "Publish"
 ```
 
+Under `[deploy_workflows]`, each key is a repository name and `default` is reserved for the fallback applied to the rest.
+
 Command-line flags always win over the file. Point at a different file with `--config FILE`; unknown settings are reported and ignored, and a malformed one stops the run rather than being silently half-applied.
 
 ## Data handling
