@@ -20,8 +20,8 @@ classifiers = [
 dependencies = ["requests>=2.31.0", "rich>=13.7.0"]
 
 [project.urls]
-Homepage = "https://github.com/rgilks/github-org-metrics"
-Issues = "https://github.com/rgilks/github-org-metrics/issues"
+Homepage = "https://github.com/tre-systems/github-org-metrics"
+Issues = "https://github.com/tre-systems/github-org-metrics/issues"
 
 [project.scripts]
 github-metrics = "github_metrics.cli:main"

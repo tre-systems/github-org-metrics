@@ -23,7 +23,7 @@ from github_metrics.models import RawData
 from github_metrics.report import render
 
 OUTPUT = Path(__file__).resolve().parent.parent / "docs" / "report.svg"
-CONSOLE_WIDTH = 104
+CONSOLE_WIDTH = 118
 
 #: Which run in each cycle of seven fails, so failures are spread out.
 FAILING_RUN_IN_CYCLE = 3
@@ -185,6 +185,7 @@ def build_data(seed: int = 20_250_401) -> RawData:
         "since": to_github_date(SINCE),
         "until": to_github_date(UNTIL),
         "fetch_pr_details": True,
+        "complete": True,
         "repos": repos,
         "commits": commits,
         "commit_stats": commit_stats,

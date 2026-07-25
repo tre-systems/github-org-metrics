@@ -53,6 +53,8 @@ class AnalysisOptions:
     outlier_threshold: int = DEFAULT_OUTLIER_THRESHOLD
     include_inactive: bool = False
     max_lead_time_hours: float = MAX_LEAD_TIME_HOURS
+    deploy_workflow: str | None = None
+    """Count this workflow as the deployment, instead of inferring one."""
 
 
 def analyze(data: RawData, options: AnalysisOptions) -> Report:
@@ -239,7 +241,9 @@ def _apply_workflow_runs(
     metrics: RepositoryMetrics,
     options: AnalysisOptions,
 ) -> None:
-    runs = _deployment_runs(data.get("workflow_runs", {}).get(name) or [], repo, options)
+    all_runs = data.get("workflow_runs", {}).get(name) or []
+    metrics.deployment_workflow = _select_deployment_workflow(all_runs, options)
+    runs = _deployment_runs(all_runs, metrics.deployment_workflow, repo, options)
 
     failure_started_at: datetime | None = None
 
@@ -273,14 +277,16 @@ def _apply_workflow_runs(
 
 
 def _deployment_runs(
-    runs: list[dict[str, Any]], repo: dict[str, Any], options: AnalysisOptions
+    runs: list[dict[str, Any]],
+    workflow: str | None,
+    repo: dict[str, Any],
+    options: AnalysisOptions,
 ) -> list[tuple[datetime, dict[str, Any]]]:
     """Select the in-window runs of a repository's deployment workflow.
 
     Returns:
         (start time, run) pairs in chronological order.
     """
-    workflow = _select_deployment_workflow(runs)
     if workflow is None:
         return []
 
@@ -310,16 +316,23 @@ def _append_if_positive(target: list[float], value: float) -> None:
         target.append(value)
 
 
-def _select_deployment_workflow(runs: list[dict[str, Any]]) -> str | None:
+def _select_deployment_workflow(
+    runs: list[dict[str, Any]], options: AnalysisOptions
+) -> str | None:
     """Pick the workflow that best represents deployments for a repository.
 
-    Deployment-shaped names win outright; otherwise the busiest CI workflow
-    stands in, since for many repositories a green pipeline on the default
-    branch *is* the deployment.
+    An explicit ``deploy_workflow`` wins if the repository actually ran it.
+    Otherwise deployment-shaped names are preferred, and failing those the
+    busiest CI workflow stands in, since for many repositories a green
+    pipeline on the default branch *is* the deployment.
     """
     names = [run["name"].lower() for run in runs if run.get("name")]
     if not names:
         return None
+
+    if options.deploy_workflow is not None:
+        wanted = options.deploy_workflow.lower()
+        return wanted if wanted in names else None
 
     for match in (_matches_deploy, _matches_ci):
         candidates = [name for name in names if match(name)]

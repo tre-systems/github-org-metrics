@@ -24,7 +24,7 @@ from rich.progress import (
 from . import __version__, cache
 from .analyze import DEFAULT_OUTLIER_THRESHOLD, AnalysisOptions, analyze
 from .client import AuthenticationError, GitHubClient, GitHubError
-from .collect import CollectionOptions, collect
+from .collect import CollectionOptions, Collector
 from .dates import months_before, parse_github_date
 from .models import RawData
 from .report import export_csv, render
@@ -36,6 +36,9 @@ __all__ = ["build_parser", "main"]
 TOKEN_ENV_VARS = ("GITHUB_TOKEN", "GH_TOKEN")
 DEFAULT_MONTHS = 3
 DEFAULT_WORKERS = 8
+
+#: Repositories between cache checkpoints during a long fetch.
+CHECKPOINT_EVERY = 10
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,6 +94,14 @@ the organization. A token is not needed when reading from the cache.
         "--fast",
         action="store_true",
         help="Skip per-pull-request reviews, comments, and branch history",
+    )
+    scope.add_argument(
+        "--deploy-workflow",
+        metavar="NAME",
+        help=(
+            "Treat this workflow as the deployment, instead of inferring one "
+            "from workflow names"
+        ),
     )
     scope.add_argument(
         "--workers",
@@ -202,6 +213,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             until=until,
             outlier_threshold=args.outlier_threshold,
             include_inactive=args.include_inactive,
+            deploy_workflow=args.deploy_workflow,
         ),
     )
 
@@ -274,16 +286,32 @@ def _load_or_collect(
     )
 
     client = GitHubClient(token)
-    data = _collect_with_progress(client, options, console)
+    checkpoint = None if args.no_cache else path
+    # --update-cache asks for a fresh answer, so it never resumes.
+    resume_from = None if args.update_cache or args.no_cache else cache.load(path)
+    collector = Collector(client, options, resume_from=resume_from)
 
-    if not args.no_cache:
+    try:
+        _collect_with_progress(collector, console, checkpoint)
+    except KeyboardInterrupt:
+        _checkpoint(collector.data, checkpoint)
+        logger.warning(
+            "Interrupted. Progress so far is cached; re-run to continue from it."
+        )
+        raise
+
+    _checkpoint(collector.data, checkpoint)
+    return collector.data
+
+
+def _checkpoint(data: RawData, path: Path | None) -> None:
+    """Write partial or complete data to the cache, if caching is enabled."""
+    if path is not None:
         cache.save(data, path)
-
-    return data
 
 
 def _collect_with_progress(
-    client: GitHubClient, options: CollectionOptions, console: Console
+    collector: Collector, console: Console, checkpoint: Path | None
 ) -> RawData:
     with Progress(
         SpinnerColumn(),
@@ -300,8 +328,11 @@ def _collect_with_progress(
             progress.update(
                 task, completed=completed, total=total, description=f"Fetched {name}"
             )
+            # Checkpoint periodically so a long run survives being interrupted.
+            if completed % CHECKPOINT_EVERY == 0 and completed != total:
+                _checkpoint(collector.data, checkpoint)
 
-        return collect(client, options, on_repo_complete=advance)
+        return collector.run(advance)
 
 
 def _warn_on_window_mismatch(data: RawData, since: datetime) -> None:

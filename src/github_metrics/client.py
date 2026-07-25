@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -126,6 +127,64 @@ class GitHubClient:
         if response is None:
             return None
         return self._decode(response)
+
+    def count(self, path: str, params: dict[str, str] | None = None) -> int:
+        """Count the items a list endpoint would return, in a single request.
+
+        Asks for one item per page and reads the page number from the ``last``
+        link, which is the total. Falls back to the length of the body when the
+        result fits on one page and GitHub sends no ``Link`` header.
+
+        Args:
+            path: API path or absolute URL.
+            params: Optional query parameters.
+
+        Returns:
+            The number of items, or 0 if the endpoint is unavailable.
+        """
+        response = self._request(self._url(path), {**(params or {}), "per_page": "1"})
+        if response is None:
+            return 0
+
+        last_page = _page_number(response.links.get("last", {}).get("url"))
+        if last_page is not None:
+            return last_page
+
+        payload = self._decode(response)
+        return len(payload) if isinstance(payload, list) else 0
+
+    def graphql(
+        self, query: str, variables: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Run a GraphQL query.
+
+        Args:
+            query: The GraphQL document.
+            variables: Optional query variables.
+
+        Returns:
+            The ``data`` object, or None if the query could not be run at all.
+            A partially successful query returns the data it did produce; the
+            errors are logged.
+        """
+        response = self._request(
+            f"{self.base_url}/graphql",
+            method="POST",
+            json={"query": query, "variables": variables or {}},
+        )
+        if response is None:
+            return None
+
+        payload = self._decode(response)
+        if not isinstance(payload, dict):
+            return None
+
+        errors = payload.get("errors")
+        if errors:
+            logger.debug("GraphQL reported errors: %s", errors)
+
+        data = payload.get("data")
+        return data if isinstance(data, dict) else None
 
     def paginate(
         self,
@@ -266,9 +325,14 @@ class GitHubClient:
         return page
 
     def _request(
-        self, url: str, params: dict[str, str] | None = None
+        self,
+        url: str,
+        params: dict[str, str] | None = None,
+        *,
+        method: str = "GET",
+        json: dict[str, Any] | None = None,
     ) -> requests.Response | None:
-        """Perform a GET, retrying transient failures and rate limits.
+        """Perform a request, retrying transient failures and rate limits.
 
         Returns:
             A successful response, or None if the resource is permanently
@@ -282,7 +346,9 @@ class GitHubClient:
 
         while True:
             try:
-                response = self._session.get(url, params=params, timeout=self.timeout)
+                response = self._session.request(
+                    method, url, params=params, json=json, timeout=self.timeout
+                )
             except requests.RequestException as exc:
                 attempts += 1
                 if attempts > self.max_retries:
@@ -378,6 +444,14 @@ class GitHubClient:
             return float(SECONDARY_RATE_LIMIT_SLEEP)
 
         return None
+
+
+def _page_number(url: str | None) -> int | None:
+    """Extract the ``page`` query parameter from a pagination link."""
+    if not url:
+        return None
+    pages = parse_qs(urlparse(url).query).get("page")
+    return _first_int(pages[0]) if pages else None
 
 
 def _first_int(value: str | None) -> int | None:

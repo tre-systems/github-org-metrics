@@ -29,6 +29,9 @@ class RawData(TypedDict):
     since: str
     until: str
     fetch_pr_details: bool
+    complete: bool
+    """False while a run is still in progress, so it can be resumed."""
+
     repos: list[dict[str, Any]]
     commits: dict[str, list[dict[str, Any]]]
     commit_stats: dict[str, dict[str, dict[str, int]]]
@@ -80,6 +83,7 @@ class RepositoryMetrics:
     commit_count: int = 0
     pr_count: int = 0
     # DORA inputs
+    deployment_workflow: str | None = None
     deployment_count: int = 0
     deployment_failures: int = 0
     deployment_durations: list[float] = field(default_factory=list)

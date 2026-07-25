@@ -153,3 +153,33 @@ class TestConsoleRendering:
         text = self.render_to_text(build_report(options))
 
         assert UNTIL.strftime("%d %b %Y") in text
+
+
+class TestDeploymentWorkflowVisibility:
+    def test_console_names_the_workflow_that_was_counted(self, options):
+        console = Console(record=True, width=140, force_terminal=False)
+        render(build_report(options), console)
+
+        assert "deploy" in console.export_text().lower()
+
+    def test_console_says_so_when_no_workflow_was_found(self, options):
+        report = analyze(
+            raw_data(
+                repos=[repo("api")],
+                commits={"api": [commit("a1", "alice", iso(2025, 2, 1))]},
+                commit_stats={"api": {"a1": {"additions": 5}}},
+            ),
+            options,
+        )
+        console = Console(record=True, width=140, force_terminal=False)
+        render(report, console)
+
+        assert "none found" in console.export_text()
+
+    def test_csv_carries_the_workflow(self, options, tmp_path):
+        export_csv(build_report(options), tmp_path)
+
+        rows = read_csv(tmp_path / "acme_github_repository_metrics.csv")
+
+        assert rows[0][8] == "Deploy Workflow"
+        assert rows[1][8] == "deploy"

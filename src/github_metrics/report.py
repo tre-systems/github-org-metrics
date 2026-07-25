@@ -39,6 +39,7 @@ REPOSITORY_HEADERS = (
     "Fail %",
     "MTTR (h)",
     "Deploy (m)",
+    "Deploy Workflow",
     "Created",
     "Updated",
     "Language",
@@ -134,6 +135,7 @@ def _repository_table(repositories: Sequence[RepositoryMetrics]) -> Table:
     table.add_column("Repository", style="cyan", no_wrap=True)
     for header in ("Commits", "PRs", "Lead (h)", "Deploys", "Fail %", "MTTR (h)"):
         table.add_column(header, justify="right")
+    table.add_column("Workflow", no_wrap=True, overflow="ellipsis", max_width=14)
     table.add_column("Language", no_wrap=True, overflow="ellipsis", max_width=12)
     table.add_column("Updated", justify="right", no_wrap=True)
 
@@ -146,6 +148,7 @@ def _repository_table(repositories: Sequence[RepositoryMetrics]) -> Table:
             f"{repo.deployment_count:,}",
             _optional(repo.failure_rate, repo.deployment_count > 0),
             _optional(repo.avg_recovery_time, bool(repo.recovery_times)),
+            repo.deployment_workflow or "[dim]none found[/dim]",
             repo.language,
             repo.updated_at,
         )
@@ -296,6 +299,7 @@ def _repository_rows(repositories: Sequence[RepositoryMetrics]) -> list[list[Any
             round(repo.failure_rate, 1),
             round(repo.avg_recovery_time, 1),
             round(repo.avg_deployment_duration, 1),
+            repo.deployment_workflow or "",
             repo.created_at,
             repo.updated_at,
             repo.language,

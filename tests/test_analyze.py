@@ -393,3 +393,59 @@ class TestReportShape:
         report = analyze(data, options)
 
         assert report.repositories == []
+
+
+class TestDeploymentWorkflowSelection:
+    def data_with_workflows(self, *names):
+        return raw_data(
+            repos=[repo("api")],
+            commits={"api": [commit("a1", "alice", iso(2025, 2, 1))]},
+            commit_stats={"api": {"a1": {"additions": 1}}},
+            workflow_runs={
+                "api": [
+                    run(name, iso(2025, 2, i + 1), "success")
+                    for i, name in enumerate(names)
+                ]
+            },
+        )
+
+    def test_records_the_workflow_it_counted(self, options):
+        report = analyze(self.data_with_workflows("Deploy", "CI"), options)
+
+        assert report.repositories[0].deployment_workflow == "deploy"
+
+    def test_override_wins_over_the_heuristic(self, options):
+        report = analyze(
+            self.data_with_workflows("Deploy", "Nightly Smoke"),
+            replace(options, deploy_workflow="Nightly Smoke"),
+        )
+
+        assert report.repositories[0].deployment_workflow == "nightly smoke"
+        assert report.repositories[0].deployment_count == 1
+
+    def test_override_matches_case_insensitively(self, options):
+        report = analyze(
+            self.data_with_workflows("Release Please"),
+            replace(options, deploy_workflow="release please"),
+        )
+
+        assert report.repositories[0].deployment_workflow == "release please"
+
+    def test_override_that_never_ran_counts_nothing(self, options):
+        report = analyze(
+            self.data_with_workflows("Deploy"),
+            replace(options, deploy_workflow="does-not-exist"),
+        )
+
+        assert report.repositories[0].deployment_workflow is None
+        assert report.repositories[0].deployment_count == 0
+
+    def test_no_workflows_at_all_records_nothing(self, options):
+        report = analyze(self.data_with_workflows(), options)
+
+        assert report.repositories[0].deployment_workflow is None
+
+    def test_cd_matches_as_a_word_but_not_inside_one(self, options):
+        report = analyze(self.data_with_workflows("cdn-purge", "build and cd"), options)
+
+        assert report.repositories[0].deployment_workflow == "build and cd"

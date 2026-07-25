@@ -7,7 +7,7 @@ import requests
 import responses
 
 from github_metrics.client import AuthenticationError, GitHubClient
-from tests.conftest import requested_urls
+from tests.conftest import request_json, requested_urls
 
 BASE = "https://api.github.com"
 
@@ -209,3 +209,87 @@ class TestPagination:
 def test_requires_a_token():
     with pytest.raises(AuthenticationError):
         GitHubClient("")
+
+
+class TestCount:
+    @responses.activate
+    def test_reads_the_total_from_the_last_link(self, client):
+        responses.get(
+            f"{BASE}/repos/acme/api/branches",
+            json=[{"name": "main"}],
+            headers={
+                "Link": f'<{BASE}/repos/acme/api/branches?page=2>; rel="next", '
+                f'<{BASE}/repos/acme/api/branches?page=37>; rel="last"'
+            },
+        )
+
+        assert client.count("/repos/acme/api/branches") == 37
+        assert len(responses.calls) == 1
+        assert "per_page=1" in requested_urls(responses.calls)[0]
+
+    @responses.activate
+    def test_falls_back_to_the_body_on_a_single_page(self, client):
+        responses.get(f"{BASE}/items", json=[{"id": 1}])
+
+        assert client.count("/items") == 1
+
+    @responses.activate
+    def test_empty_endpoint_counts_zero(self, client):
+        responses.get(f"{BASE}/items", json=[])
+
+        assert client.count("/items") == 0
+
+    @responses.activate
+    def test_unavailable_endpoint_counts_zero(self, client):
+        responses.get(f"{BASE}/items", status=404, json={})
+
+        assert client.count("/items") == 0
+
+    @responses.activate
+    def test_ignores_an_unparsable_last_link(self, client):
+        responses.get(
+            f"{BASE}/items",
+            json=[{"id": 1}],
+            headers={"Link": f'<{BASE}/items?page=abc>; rel="last"'},
+        )
+
+        assert client.count("/items") == 1
+
+
+class TestGraphQL:
+    @responses.activate
+    def test_posts_the_query_and_returns_data(self, client):
+        responses.post(f"{BASE}/graphql", json={"data": {"repository": {"c0": {}}}})
+
+        result = client.graphql("query {}", {"owner": "acme"})
+
+        assert result == {"repository": {"c0": {}}}
+        assert responses.calls[0].request.method == "POST"
+        assert request_json(responses.calls[0])["variables"] == {"owner": "acme"}
+
+    @responses.activate
+    def test_returns_partial_data_alongside_errors(self, client):
+        responses.post(
+            f"{BASE}/graphql",
+            json={"data": {"repository": {"c0": None}}, "errors": [{"message": "nope"}]},
+        )
+
+        assert client.graphql("query {}") == {"repository": {"c0": None}}
+
+    @responses.activate
+    def test_returns_none_when_the_query_fails(self, client):
+        responses.post(f"{BASE}/graphql", status=502, json={})
+        responses.post(f"{BASE}/graphql", status=502, json={})
+        responses.post(f"{BASE}/graphql", status=502, json={})
+
+        assert client.graphql("query {}") is None
+
+    @responses.activate
+    def test_rate_limits_apply_to_graphql_too(self, client, sleeps):
+        responses.post(
+            f"{BASE}/graphql", status=429, json={}, headers={"Retry-After": "5"}
+        )
+        responses.post(f"{BASE}/graphql", json={"data": {"ok": True}})
+
+        assert client.graphql("query {}") == {"ok": True}
+        assert sleeps == [5.0]

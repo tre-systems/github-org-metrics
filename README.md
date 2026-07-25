@@ -2,7 +2,7 @@
 
 A command-line tool that measures how a GitHub organization actually delivers software: who contributes, which repositories are busy, and where the [DORA metrics](https://dora.dev/) land.
 
-[![CI](https://github.com/rgilks/github-org-metrics/actions/workflows/ci.yml/badge.svg)](https://github.com/rgilks/github-org-metrics/actions/workflows/ci.yml)
+[![CI](https://github.com/tre-systems/github-org-metrics/actions/workflows/ci.yml/badge.svg)](https://github.com/tre-systems/github-org-metrics/actions/workflows/ci.yml)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
 
@@ -38,7 +38,7 @@ Each is rated against the published DORA bands (Elite / High / Medium / Low). Se
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.12+.
 
 ```bash
-git clone https://github.com/rgilks/github-org-metrics.git
+git clone https://github.com/tre-systems/github-org-metrics.git
 cd github-org-metrics
 uv sync
 ```
@@ -110,6 +110,7 @@ uv run github-metrics my-org --use-cache --anonymize
 | `--repos N` | Analyse only the N most recently active repositories | all |
 | `--target-repos A B C` | Analyse specific repositories by name | - |
 | `--fast` | Skip per-pull-request reviews, comments, and branch history | off |
+| `--deploy-workflow NAME` | Treat this workflow as the deployment, instead of inferring one | inferred |
 | `--workers N` | Concurrent API requests | 8 |
 | `--output-dir DIR` | Where to write CSVs and the cache | current directory |
 | `--no-csv` | Skip writing CSV files | off |
@@ -130,7 +131,7 @@ Three CSV files are written alongside the console report.
 
 **`<org>_github_outliers.csv`** — the same columns, for contributors above the outlier threshold. Only written when there are any.
 
-**`<org>_github_repository_metrics.csv`** — Repository, Commits, PRs, Lead Time (h), Deploys, Fail %, MTTR (h), Deploy (m), Created, Updated, Language, Branches, Contributors.
+**`<org>_github_repository_metrics.csv`** — Repository, Commits, PRs, Lead Time (h), Deploys, Fail %, MTTR (h), Deploy (m), Deploy Workflow, Created, Updated, Language, Branches, Contributors.
 
 `--anonymize` applies to the CSVs as well as the console, so an anonymised run leaks no logins anywhere.
 
@@ -146,15 +147,17 @@ The cache records the window it was fetched for. Asking for a wider window than 
 
 ## Cost and speed
 
-A full run is dominated by two per-item endpoints: one request per commit for line counts, and up to three per pull request for reviews, comments, and branch history. These are issued concurrently (`--workers`), and pagination stops as soon as it walks past the window.
+Commit line counts are batched through GraphQL, 50 commits per request, falling back to the REST per-commit endpoint for anything GraphQL cannot resolve. Branch and contributor counts take one request each rather than paginating a list to length it. What remains is up to three requests per pull request for reviews, comments, and branch history; these are issued concurrently (`--workers`), and pagination stops as soon as it walks past the window.
 
 `--fast` skips the per-pull-request calls entirely. Reviews and comments are then reported as `N/A`, and lead time falls back to each pull request's creation date, which understates it by however long the branch existed beforehand.
 
 The tool waits out primary rate limits, honours `Retry-After` on secondary ones, and retries transient server errors with backoff, so a long run survives being throttled.
 
+Long runs are also resumable. Progress is checkpointed to the cache every ten repositories and whenever a run is interrupted, and re-running the same command continues from that checkpoint rather than starting over. Only an unfinished run is resumed — a completed cache is a finished answer, and `--use-cache` is how you ask for it.
+
 ## Accuracy and limitations
 
-- **Deployments are inferred, not observed.** GitHub has no universal notion of a deployment, so the busiest deployment-shaped workflow (`deploy`, `release`, `publish`, else `ci`/`cd`/`build`/`test`) on the default branch stands in for one. A repository that deploys outside GitHub Actions reports no deployments.
+- **Deployments are inferred, not observed.** GitHub has no universal notion of a deployment, so the busiest deployment-shaped workflow (`deploy`, `release`, `publish`, else `ci`/`cd`/`build`/`test`) on the default branch stands in for one. The report names the workflow it counted per repository, so you can check the guess; override it with `--deploy-workflow NAME`. A repository that deploys outside GitHub Actions reports no deployments.
 - **Lead time excludes branches older than 90 days.** They are real, but they are not what the metric is trying to describe.
 - **Line counts come from GitHub's own commit stats** and include whatever was committed — generated files, vendored dependencies, and large reformats all count. That is what the outliers table is for.
 - **Commits are counted on the default branch only**, which is what the commits endpoint returns.
@@ -185,7 +188,7 @@ The layout keeps the analysis testable without a network:
 | `analyze.py` | Pure aggregation of raw payloads into metrics |
 | `dora.py` | DORA performance bands |
 | `report.py` | Console tables and CSV export |
-| `cache.py` | Versioned on-disk cache |
+| `cache.py` | Versioned on-disk cache and checkpoints |
 | `cli.py` | Argument handling and orchestration |
 
 Regenerate the README image after changing the console output:

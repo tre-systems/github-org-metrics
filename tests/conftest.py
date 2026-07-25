@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -92,6 +93,7 @@ def raw_data(**overrides: Any) -> RawData:
         "since": iso(2025, 1, 1, 0),
         "until": iso(2025, 4, 1, 0),
         "fetch_pr_details": True,
+        "complete": True,
         "repos": [],
         "commits": {},
         "commit_stats": {},
@@ -105,6 +107,12 @@ def raw_data(**overrides: Any) -> RawData:
     }
     base.update(overrides)
     return base  # type: ignore[return-value]
+
+
+def request_json(call: Any) -> Any:
+    """Decode a recorded request body as JSON."""
+    body = call.request.body
+    return json.loads(body.decode() if isinstance(body, bytes) else body)
 
 
 def requested_urls(calls: Any) -> list[str]:

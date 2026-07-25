@@ -131,3 +131,150 @@ class TestFailureModes:
 
         assert code == 2
         assert "rejected the token" in caplog.text
+
+
+class TestDeployWorkflowFlag:
+    def test_flag_reaches_the_analysis(self, cached_org, capsys):
+        code = main(
+            [
+                "acme",
+                "--use-cache",
+                "--deploy-workflow",
+                "Deploy",
+                "--output-dir",
+                str(cached_org),
+            ]
+        )
+
+        assert code == 0
+        assert "deploy" in capsys.readouterr().out.lower()
+
+    def test_unknown_workflow_reports_no_deployments(self, cached_org, capsys):
+        main(
+            [
+                "acme",
+                "--use-cache",
+                "--deploy-workflow",
+                "not-a-workflow",
+                "--output-dir",
+                str(cached_org),
+            ]
+        )
+
+        assert "none found" in capsys.readouterr().out
+
+
+class TestFetchingRun:
+    """The API-backed path: caching, checkpointing, and resuming."""
+
+    BASE = "https://api.github.com"
+
+    def stub_org(self, mocked, *names):
+        mocked.get(
+            f"{self.BASE}/orgs/acme/repos",
+            json=[
+                {
+                    "name": name,
+                    "pushed_at": days_ago(1),
+                    "created_at": days_ago(400),
+                    "default_branch": "main",
+                    "language": "Python",
+                }
+                for name in names
+            ],
+        )
+
+    def stub_repo(self, mocked, name):
+        prefix = f"{self.BASE}/repos/acme/{name}"
+        mocked.get(f"{prefix}/commits", json=[])
+        mocked.get(f"{prefix}/branches", json=[])
+        mocked.get(f"{prefix}/contributors", json=[])
+        mocked.get(f"{prefix}/pulls", json=[])
+        mocked.get(f"{prefix}/actions/runs", json={"workflow_runs": []})
+
+    def test_writes_a_cache_marked_complete(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+        with responses.RequestsMock() as mocked:
+            self.stub_org(mocked, "api")
+            self.stub_repo(mocked, "api")
+            assert main(["acme", "--output-dir", str(tmp_path)]) == 0
+
+        cached = cache.load(cache.cache_path("acme", tmp_path))
+        assert cached is not None
+        assert cached["complete"] is True
+
+    def test_interrupt_checkpoints_partial_progress(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+
+        def interrupt(_request):
+            raise KeyboardInterrupt
+
+        with responses.RequestsMock() as mocked:
+            self.stub_org(mocked, "api", "later")
+            self.stub_repo(mocked, "api")
+            mocked.add_callback(
+                responses.GET, f"{self.BASE}/repos/acme/later/commits", callback=interrupt
+            )
+            assert main(["acme", "--output-dir", str(tmp_path)]) == 130
+
+        cached = cache.load(cache.cache_path("acme", tmp_path))
+        assert cached is not None
+        assert cached["complete"] is False
+        assert "api" in cached["commits"]
+        assert "re-run to continue" in caplog.text
+
+    def test_a_later_run_resumes_from_the_checkpoint(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+
+        def interrupt(_request):
+            raise KeyboardInterrupt
+
+        with responses.RequestsMock() as mocked:
+            self.stub_org(mocked, "api", "later")
+            self.stub_repo(mocked, "api")
+            mocked.add_callback(
+                responses.GET, f"{self.BASE}/repos/acme/later/commits", callback=interrupt
+            )
+            main(["acme", "--output-dir", str(tmp_path)])
+
+        with responses.RequestsMock() as mocked:
+            self.stub_org(mocked, "api", "later")
+            self.stub_repo(mocked, "later")
+            assert main(["acme", "--output-dir", str(tmp_path)]) == 0
+            fetched = " ".join(str(call.request.url) for call in mocked.calls)
+
+        # "api" came from the checkpoint, so only "later" was fetched again.
+        assert "/repos/acme/api/" not in fetched
+        assert "/repos/acme/later/" in fetched
+
+    def test_update_cache_refetches_everything(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+
+        def interrupt(_request):
+            raise KeyboardInterrupt
+
+        with responses.RequestsMock() as mocked:
+            self.stub_org(mocked, "api", "later")
+            self.stub_repo(mocked, "api")
+            mocked.add_callback(
+                responses.GET, f"{self.BASE}/repos/acme/later/commits", callback=interrupt
+            )
+            main(["acme", "--output-dir", str(tmp_path)])
+
+        with responses.RequestsMock() as mocked:
+            self.stub_org(mocked, "api", "later")
+            self.stub_repo(mocked, "api")
+            self.stub_repo(mocked, "later")
+            assert main(["acme", "--update-cache", "--output-dir", str(tmp_path)]) == 0
+            fetched = " ".join(str(call.request.url) for call in mocked.calls)
+
+        assert "/repos/acme/api/" in fetched
+
+    def test_no_cache_writes_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+        with responses.RequestsMock() as mocked:
+            self.stub_org(mocked, "api")
+            self.stub_repo(mocked, "api")
+            main(["acme", "--no-cache", "--no-csv", "--output-dir", str(tmp_path)])
+
+        assert not list(tmp_path.glob("*.json"))
