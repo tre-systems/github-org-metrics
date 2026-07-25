@@ -10,13 +10,16 @@ import logging
 import re
 import statistics
 from collections import Counter
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from .dates import format_date_for_display, parse_github_date
 from .models import (
+    DEPLOY_SHAPED,
+    EXPLICIT,
+    INFERRED_FROM_CI,
     BulkCommits,
     DeveloperMetrics,
     DoraSummary,
@@ -64,7 +67,13 @@ class AnalysisOptions:
     max_lead_time_hours: float = MAX_LEAD_TIME_HOURS
     max_recovery_hours: float = MAX_RECOVERY_HOURS
     deploy_workflow: str | None = None
-    """Count this workflow as the deployment, instead of inferring one."""
+    """Count this workflow as the deployment in every repository."""
+
+    deploy_workflow_by_repo: Mapping[str, str] = field(default_factory=dict)
+    """Per-repository workflow names, taking precedence over the default."""
+
+    strict_deployments: bool = False
+    """Count nothing rather than fall back to a plain CI workflow."""
 
 
 def analyze(data: RawData, options: AnalysisOptions) -> Report:
@@ -263,8 +272,10 @@ def _apply_workflow_runs(
     options: AnalysisOptions,
 ) -> None:
     all_runs = data.get("workflow_runs", {}).get(name) or []
-    metrics.deployment_workflow = _select_deployment_workflow(all_runs, options)
-    runs = _deployment_runs(all_runs, metrics.deployment_workflow, repo, options)
+    workflow, source = _select_deployment_workflow(all_runs, name, options)
+    metrics.deployment_workflow = workflow
+    metrics.deployment_workflow_source = source
+    runs = _deployment_runs(all_runs, workflow, repo, options)
 
     failure_started_at: datetime | None = None
 
@@ -339,29 +350,41 @@ def _append_if_positive(target: list[float], value: float) -> None:
 
 
 def _select_deployment_workflow(
-    runs: list[dict[str, Any]], options: AnalysisOptions
-) -> str | None:
+    runs: list[dict[str, Any]], repo: str, options: AnalysisOptions
+) -> tuple[str | None, str | None]:
     """Pick the workflow that best represents deployments for a repository.
 
-    An explicit ``deploy_workflow`` wins if the repository actually ran it.
-    Otherwise deployment-shaped names are preferred, and failing those the
-    busiest CI workflow stands in, since for many repositories a green
-    pipeline on the default branch *is* the deployment.
+    A name given for this repository wins, then a name given for the whole run,
+    then a deployment-shaped name. Failing all of those the busiest CI workflow
+    stands in, since for many repositories a green pipeline on the default
+    branch *is* the deployment — unless ``strict_deployments`` says not to
+    guess.
+
+    Returns:
+        The workflow name and how it was chosen, or (None, None) if nothing
+        qualifies.
     """
     names = [run["name"].lower() for run in runs if run.get("name")]
     if not names:
-        return None
+        return None, None
 
-    if options.deploy_workflow is not None:
-        wanted = options.deploy_workflow.lower()
-        return wanted if wanted in names else None
+    requested = options.deploy_workflow_by_repo.get(repo, options.deploy_workflow)
+    if requested is not None:
+        wanted = requested.lower()
+        return (wanted, EXPLICIT) if wanted in names else (None, None)
 
-    for match in (_matches_deploy, _matches_ci):
-        candidates = [name for name in names if match(name)]
-        if candidates:
-            return _most_common(candidates)
+    deploy_shaped = [name for name in names if _matches_deploy(name)]
+    if deploy_shaped:
+        return _most_common(deploy_shaped), DEPLOY_SHAPED
 
-    return _most_common(names)
+    if options.strict_deployments:
+        return None, None
+
+    ci_shaped = [name for name in names if _matches_ci(name)]
+    if ci_shaped:
+        return _most_common(ci_shaped), INFERRED_FROM_CI
+
+    return _most_common(names), INFERRED_FROM_CI
 
 
 def _most_common(names: list[str]) -> str:
@@ -398,6 +421,12 @@ def _summarise_dora(
         deploys_total=deploys,
         deploys_per_day=deploys / window_days,
         change_failure_rate=(failures / deploys * 100) if deploys else 0.0,
+        inferred_deployment_repos=sum(
+            1
+            for repo in repositories
+            if repo.deployment_workflow_source == INFERRED_FROM_CI
+            and repo.deployment_count > 0
+        ),
         recovery_time_mean=_mean(recovery_times),
         recovery_time_samples=len(recovery_times),
         abandoned_failures=sum(repo.abandoned_failures for repo in repositories),

@@ -112,7 +112,8 @@ uv run github-metrics my-org --use-cache --anonymize
 | `--repos N` | Analyse only the N most recently active repositories | all |
 | `--target-repos A B C` | Analyse specific repositories by name | - |
 | `--fast` | Skip per-pull-request reviews, comments, and branch history | off |
-| `--deploy-workflow NAME` | Treat this workflow as the deployment, instead of inferring one | inferred |
+| `--deploy-workflow [REPO=]NAME` | Treat this workflow as the deployment; repeatable, per repository or for all | inferred |
+| `--strict-deployments` | Count only deployment-shaped workflows, never a repository's CI workflow | off |
 | `--workers N` | Concurrent API requests | 8 |
 | `--output-dir DIR` | Where to write CSVs and the cache | current directory |
 | `--no-csv` | Skip writing CSV files | off |
@@ -157,7 +158,17 @@ Long runs are also resumable. Progress is checkpointed to the cache every ten re
 
 ## Accuracy and limitations
 
-- **Deployments are inferred, not observed.** GitHub has no universal notion of a deployment, so the busiest deployment-shaped workflow (`deploy`, `release`, `publish`, else `ci`/`cd`/`build`/`test`) on the default branch stands in for one. The report names the workflow it counted per repository, so you can check the guess; override it with `--deploy-workflow NAME`. A repository that deploys outside GitHub Actions reports no deployments.
+- **Deployments are inferred, not observed.** GitHub has no universal notion of a deployment, so the busiest deployment-shaped workflow (`deploy`, `release`, `publish`) on the default branch stands in for one, falling back to a repository's CI workflow. The report names the workflow it counted for each repository and dims the name where it was only a CI fallback, and the deployment frequency says how many repositories that applies to. A repository that deploys outside GitHub Actions reports no deployments.
+
+  That fallback is generous: a green CI run is not a release. Correct it per repository, or refuse to guess:
+
+  ```bash
+  uv run github-metrics my-org --deploy-workflow api=Release --deploy-workflow web=Publish
+  ```
+
+  ```bash
+  uv run github-metrics my-org --strict-deployments
+  ```
 - **Lead time excludes branches older than 90 days**, and time-to-restore excludes gaps longer than 7 days. Both are real events, but a branch abandoned for a quarter is not a lead time, and a pipeline left red for a fortnight is an abandoned workflow rather than a fortnight-long outage. Failures beyond the cap are still counted in the change failure rate, and reported alongside the recovery figure.
 - **Line counts come from GitHub's own commit stats.** Commits above `--bulk-commit-lines` are excluded to keep generated and vendored files from swamping the totals, but everything below it still counts, including large reformats.
 - **Commits are counted on the default branch only**, which is what the commits endpoint returns.

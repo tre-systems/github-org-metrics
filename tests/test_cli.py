@@ -8,7 +8,7 @@ import pytest
 import responses
 
 from github_metrics import cache
-from github_metrics.cli import build_parser, main
+from github_metrics.cli import _parse_deploy_workflows, build_parser, main
 from github_metrics.dates import to_github_date
 from tests.conftest import commit, pull, raw_data, repo, run
 
@@ -37,6 +37,20 @@ def cached_org(tmp_path):
             "api": {"1": [{"user": {"login": "bob"}, "submitted_at": days_ago(8)}]}
         },
         workflow_runs={"api": [run("Deploy", days_ago(7), "success")]},
+        since=days_ago(90),
+    )
+    cache.save(data, cache.cache_path("acme", tmp_path))
+    return tmp_path
+
+
+@pytest.fixture
+def ci_only_org(tmp_path):
+    """A cached org whose only workflow is plain CI."""
+    data = raw_data(
+        repos=[repo("api")],
+        commits={"api": [commit("a1", "alice", days_ago(10))]},
+        commit_stats={"api": {"a1": {"additions": 42, "deletions": 7}}},
+        workflow_runs={"api": [run("CI", days_ago(7), "success")]},
         since=days_ago(90),
     )
     cache.save(data, cache.cache_path("acme", tmp_path))
@@ -278,3 +292,46 @@ class TestFetchingRun:
             main(["acme", "--no-cache", "--no-csv", "--output-dir", str(tmp_path)])
 
         assert not list(tmp_path.glob("*.json"))
+
+
+class TestDeployWorkflowParsing:
+    def test_a_bare_name_applies_everywhere(self):
+        assert _parse_deploy_workflows(["Deploy"]) == ("Deploy", {})
+
+    def test_repo_scoped_names_are_collected(self):
+        assert _parse_deploy_workflows(["api=Ship It", "web=Publish"]) == (
+            None,
+            {"api": "Ship It", "web": "Publish"},
+        )
+
+    def test_a_default_and_overrides_can_be_mixed(self):
+        assert _parse_deploy_workflows(["CI", "api=Deploy"]) == ("CI", {"api": "Deploy"})
+
+    def test_names_containing_equals_are_kept_intact(self):
+        assert _parse_deploy_workflows(["api=build=test"]) == (
+            None,
+            {"api": "build=test"},
+        )
+
+    def test_nothing_given_means_infer(self):
+        assert _parse_deploy_workflows(None) == (None, {})
+
+    def test_strict_flag_reaches_the_analysis(self, ci_only_org, capsys):
+        assert (
+            main(
+                [
+                    "acme",
+                    "--use-cache",
+                    "--strict-deployments",
+                    "--output-dir",
+                    str(ci_only_org),
+                ]
+            )
+            == 0
+        )
+        assert "none found" in capsys.readouterr().out
+
+    def test_without_the_flag_a_ci_workflow_stands_in(self, ci_only_org, capsys):
+        main(["acme", "--use-cache", "--output-dir", str(ci_only_org)])
+
+        assert "none found" not in capsys.readouterr().out

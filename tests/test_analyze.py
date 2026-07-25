@@ -562,3 +562,102 @@ class TestRecoveryCap:
 
         assert report.dora.recovery_time_mean == pytest.approx(2.0)
         assert report.dora.abandoned_failures == 1
+
+
+class TestPerRepositoryWorkflows:
+    def two_repos(self):
+        return raw_data(
+            repos=[repo("api"), repo("web")],
+            commits={
+                "api": [commit("a1", "alice", iso(2025, 2, 1))],
+                "web": [commit("w1", "alice", iso(2025, 2, 1))],
+            },
+            commit_stats={
+                "api": {"a1": {"additions": 5}},
+                "web": {"w1": {"additions": 5}},
+            },
+            workflow_runs={
+                "api": [
+                    run("Ship It", iso(2025, 2, 2), "success"),
+                    run("CI", iso(2025, 2, 3), "success"),
+                ],
+                "web": [
+                    run("Publish", iso(2025, 2, 2), "success"),
+                    run("CI", iso(2025, 2, 3), "success"),
+                ],
+            },
+        )
+
+    def by_name(self, report):
+        return {r.name: r for r in report.repositories}
+
+    def test_a_name_can_be_given_per_repository(self, options):
+        report = analyze(
+            self.two_repos(),
+            replace(options, deploy_workflow_by_repo={"api": "Ship It"}),
+        )
+
+        repos = self.by_name(report)
+        assert repos["api"].deployment_workflow == "ship it"
+        assert repos["api"].deployment_workflow_source == "explicit"
+        # web falls back to its own deployment-shaped workflow.
+        assert repos["web"].deployment_workflow == "publish"
+        assert repos["web"].deployment_workflow_source == "deploy"
+
+    def test_per_repository_names_beat_the_global_one(self, options):
+        report = analyze(
+            self.two_repos(),
+            replace(
+                options,
+                deploy_workflow="CI",
+                deploy_workflow_by_repo={"api": "Ship It"},
+            ),
+        )
+
+        repos = self.by_name(report)
+        assert repos["api"].deployment_workflow == "ship it"
+        assert repos["web"].deployment_workflow == "ci"
+
+    def test_records_when_a_workflow_was_only_inferred_from_ci(self, options):
+        data = raw_data(
+            repos=[repo("api")],
+            commits={"api": [commit("a1", "alice", iso(2025, 2, 1))]},
+            commit_stats={"api": {"a1": {"additions": 5}}},
+            workflow_runs={"api": [run("CI", iso(2025, 2, 2), "success")]},
+        )
+
+        report = analyze(data, options)
+
+        assert report.repositories[0].deployment_workflow_source == "ci"
+        assert report.dora.inferred_deployment_repos == 1
+
+    def test_strict_mode_refuses_to_guess(self, options):
+        data = raw_data(
+            repos=[repo("api")],
+            commits={"api": [commit("a1", "alice", iso(2025, 2, 1))]},
+            commit_stats={"api": {"a1": {"additions": 5}}},
+            workflow_runs={"api": [run("CI", iso(2025, 2, 2), "success")]},
+        )
+
+        report = analyze(data, replace(options, strict_deployments=True))
+
+        assert report.repositories[0].deployment_workflow is None
+        assert report.repositories[0].deployment_count == 0
+        assert report.dora.deploys_total == 0
+
+    def test_strict_mode_still_counts_deployment_shaped_workflows(self, options):
+        report = analyze(self.two_repos(), replace(options, strict_deployments=True))
+
+        repos = self.by_name(report)
+        assert repos["web"].deployment_workflow == "publish"
+        assert report.dora.inferred_deployment_repos == 0
+
+    def test_strict_mode_still_honours_an_explicit_name(self, options):
+        report = analyze(
+            self.two_repos(),
+            replace(
+                options, strict_deployments=True, deploy_workflow_by_repo={"api": "CI"}
+            ),
+        )
+
+        assert self.by_name(report)["api"].deployment_workflow == "ci"

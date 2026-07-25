@@ -7,7 +7,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, TypedDict
 
+#: How a repository's deployment workflow was chosen.
+EXPLICIT = "explicit"
+DEPLOY_SHAPED = "deploy"
+INFERRED_FROM_CI = "ci"
+
 __all__ = [
+    "DEPLOY_SHAPED",
+    "EXPLICIT",
+    "INFERRED_FROM_CI",
     "BulkCommits",
     "DeveloperMetrics",
     "DoraRating",
@@ -85,6 +93,9 @@ class RepositoryMetrics:
     pr_count: int = 0
     # DORA inputs
     deployment_workflow: str | None = None
+    deployment_workflow_source: str | None = None
+    """How the workflow was chosen: "explicit", "deploy", or "ci"."""
+
     deployment_count: int = 0
     deployment_failures: int = 0
     deployment_durations: list[float] = field(default_factory=list)
@@ -154,6 +165,9 @@ class DoraSummary:
     deploys_total: int
     deploys_per_day: float
     change_failure_rate: float
+    inferred_deployment_repos: int
+    """Repositories whose "deployments" are really just a CI workflow."""
+
     recovery_time_mean: float
     recovery_time_samples: int
     abandoned_failures: int

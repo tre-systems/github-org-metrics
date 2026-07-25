@@ -13,7 +13,13 @@ from rich.console import Console
 from rich.table import Table
 
 from . import dora
-from .models import DeveloperMetrics, DoraSummary, Report, RepositoryMetrics
+from .models import (
+    INFERRED_FROM_CI,
+    DeveloperMetrics,
+    DoraSummary,
+    Report,
+    RepositoryMetrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +152,7 @@ def _repository_table(repositories: Sequence[RepositoryMetrics]) -> Table:
             f"{repo.deployment_count:,}",
             _optional(repo.failure_rate, repo.deployment_count > 0),
             _optional(repo.avg_recovery_time, bool(repo.recovery_times)),
-            repo.deployment_workflow or "[dim]none found[/dim]",
+            _workflow_cell(repo),
             repo.language,
             repo.updated_at,
         )
@@ -177,8 +183,7 @@ def _dora_table(report: Report) -> Table:
             if summary.deploys_total
             else "no data",
             dora.rate_deployment_frequency(summary.deploys_per_day),
-            f"{_count(summary.deploys_total, 'run')} over "
-            f"{_count(round(report.window_days), 'day')}",
+            _deployment_basis(summary, report),
         ),
         (
             "Change failure rate",
@@ -207,6 +212,30 @@ def _dora_table(report: Report) -> Table:
         table.add_row(metric, value, f"[{style}]{rating}[/{style}]", basis)
 
     return table
+
+
+def _workflow_cell(repo: RepositoryMetrics) -> str:
+    """Render the deployment workflow, dimmed when it was only inferred."""
+    if repo.deployment_workflow is None:
+        return "[dim]none found[/dim]"
+    if repo.deployment_workflow_source == INFERRED_FROM_CI:
+        return f"[dim]{repo.deployment_workflow}[/dim]"
+    return repo.deployment_workflow
+
+
+def _deployment_basis(summary: DoraSummary, report: Report) -> str:
+    """Explain what the deployment frequency was counted from."""
+    basis = (
+        f"{_count(summary.deploys_total, 'run')} over "
+        f"{_count(round(report.window_days), 'day')}"
+    )
+    if summary.inferred_deployment_repos:
+        basis += (
+            f"; {summary.inferred_deployment_repos} "
+            f"{'repo' if summary.inferred_deployment_repos == 1 else 'repos'} "
+            "counting a CI workflow"
+        )
+    return basis
 
 
 def _recovery_basis(summary: DoraSummary) -> str:

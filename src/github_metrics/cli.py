@@ -97,10 +97,20 @@ the organization. A token is not needed when reading from the cache.
     )
     scope.add_argument(
         "--deploy-workflow",
-        metavar="NAME",
+        action="append",
+        metavar="[REPO=]NAME",
         help=(
-            "Treat this workflow as the deployment, instead of inferring one "
-            "from workflow names"
+            "Treat this workflow as the deployment instead of inferring one. "
+            "Repeatable: a bare NAME applies to every repository, REPO=NAME to "
+            "one"
+        ),
+    )
+    scope.add_argument(
+        "--strict-deployments",
+        action="store_true",
+        help=(
+            "Count only deployment-shaped workflows, rather than falling back "
+            "to a repository's CI workflow"
         ),
     )
     scope.add_argument(
@@ -206,6 +216,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     _warn_on_window_mismatch(data, since)
 
+    default_workflow, workflows_by_repo = _parse_deploy_workflows(args.deploy_workflow)
+
     report = analyze(
         data,
         AnalysisOptions(
@@ -213,7 +225,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             until=until,
             bulk_commit_lines=args.bulk_commit_lines,
             include_inactive=args.include_inactive,
-            deploy_workflow=args.deploy_workflow,
+            deploy_workflow=default_workflow,
+            deploy_workflow_by_repo=workflows_by_repo,
+            strict_deployments=args.strict_deployments,
         ),
     )
 
@@ -345,6 +359,31 @@ def _warn_on_window_mismatch(data: RawData, since: datetime) -> None:
             cached_since.date(),
             since.date(),
         )
+
+
+def _parse_deploy_workflows(
+    values: list[str] | None,
+) -> tuple[str | None, dict[str, str]]:
+    """Split ``--deploy-workflow`` values into a default and per-repo names.
+
+    Args:
+        values: Raw ``NAME`` or ``REPO=NAME`` strings, in the order given.
+
+    Returns:
+        The default workflow name (None if only per-repo names were given) and
+        the per-repository mapping.
+    """
+    default: str | None = None
+    by_repo: dict[str, str] = {}
+
+    for value in values or []:
+        repo, separator, name = value.partition("=")
+        if separator and repo and name:
+            by_repo[repo] = name
+        else:
+            default = value
+
+    return default, by_repo
 
 
 def _resolve_token() -> str | None:
