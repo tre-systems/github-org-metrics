@@ -75,6 +75,9 @@ class AnalysisOptions:
     strict_deployments: bool = False
     """Count nothing rather than fall back to a plain CI workflow."""
 
+    exclude_users: frozenset[str] = frozenset()
+    """Logins to leave out entirely, matched case-insensitively."""
+
 
 def analyze(data: RawData, options: AnalysisOptions) -> Report:
     """Summarise collected data into a report.
@@ -164,7 +167,7 @@ def _apply_commits(
 
         metrics.commit_count += 1
 
-        login = _login(commit.get("author"))
+        login = _login(commit.get("author"), options)
         if login is None:
             continue
 
@@ -201,7 +204,7 @@ def _apply_pull_requests(
 
         metrics.pr_count += 1
 
-        login = _login(pull.get("user"))
+        login = _login(pull.get("user"), options)
         if login is not None:
             developer = _developer(developers, login)
             developer.repositories[repo] += 1
@@ -246,7 +249,7 @@ def _apply_reviews_and_comments(
         for review in reviews or []:
             if not _in_window(parse_github_date(review.get("submitted_at")), options):
                 continue
-            login = _login(review.get("user"))
+            login = _login(review.get("user"), options)
             if login is not None:
                 _developer(developers, login).prs_reviewed += 1
 
@@ -254,7 +257,7 @@ def _apply_reviews_and_comments(
         for comment in comments or []:
             if not _in_window(parse_github_date(comment.get("created_at")), options):
                 continue
-            login = _login(comment.get("user"))
+            login = _login(comment.get("user"), options)
             if login is not None:
                 _developer(developers, login).pr_comments += 1
 
@@ -486,8 +489,8 @@ def _developer(developers: dict[str, DeveloperMetrics], login: str) -> Developer
     return developer
 
 
-def _login(user: dict[str, Any] | None) -> str | None:
-    """Extract a human account's login, filtering out bots."""
+def _login(user: dict[str, Any] | None, options: AnalysisOptions) -> str | None:
+    """Extract a human account's login, filtering out bots and exclusions."""
     if not isinstance(user, dict):
         return None
 
@@ -495,6 +498,8 @@ def _login(user: dict[str, Any] | None) -> str | None:
     if not login or not isinstance(login, str):
         return None
     if user.get("type") == "Bot" or login.endswith("[bot]"):
+        return None
+    if login.lower() in options.exclude_users:
         return None
     return login
 

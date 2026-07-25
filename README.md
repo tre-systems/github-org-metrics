@@ -16,7 +16,7 @@ A command-line tool that measures how a GitHub organization actually delivers so
 
 Commits, lines added and deleted, pull requests opened, reviews given, and review comments — per person, over the chosen window.
 
-Bot accounts are excluded. So are contributors who changed no lines, unless you pass `--include-inactive` (useful when you care about reviewers).
+Bot accounts are excluded, as is anything listed in `exclude_users` or `--exclude-user` — useful for AI agent accounts, which GitHub does not mark as bots. So are contributors who changed no lines, unless you pass `--include-inactive` (useful when you care about reviewers).
 
 Line counts skip individual commits above 10,000 added lines, and the report says how many were dropped. Those commits are lockfiles, vendored dependencies, and generated output: in one real organization, 10 commits out of 3,921 accounted for 58% of every line added, against a median commit of 85 lines. The commits still count towards commit totals — it is only their line counts that are set aside. Tune with `--bulk-commit-lines`, or pass `0` to count everything.
 
@@ -109,6 +109,7 @@ uv run github-metrics my-org --use-cache --anonymize
 |--------|-------------|---------|
 | `--months N` | Calendar months to analyse | 3 |
 | `--days N` | Days to analyse, instead of `--months` | - |
+| `--compare-previous` | Also analyse the preceding window and show how each metric moved | off |
 | `--repos N` | Analyse only the N most recently active repositories | all |
 | `--target-repos A B C` | Analyse specific repositories by name | - |
 | `--fast` | Skip per-pull-request reviews, comments, and branch history | off |
@@ -120,11 +121,58 @@ uv run github-metrics my-org --use-cache --anonymize
 | `--export-svg FILE` | Also save the console report as an SVG image | - |
 | `--anonymize` | Replace logins with stable pseudonyms everywhere | off |
 | `--bulk-commit-lines N` | Exclude commits adding more than this many lines from developer totals (0 counts everything) | 10,000 |
+| `--exclude-user LOGIN` | Leave an account out entirely; repeatable | - |
 | `--include-inactive` | Include contributors who changed no lines | off |
 | `--use-cache` | Analyse cached data instead of calling the API | off |
 | `--update-cache` | Fetch fresh data and rewrite the cache | off |
 | `--no-cache` | Do not write a cache file | off |
+| `--config FILE` | Settings file to read | `.github-metrics.toml` |
 | `-v`, `--verbose` / `-q`, `--quiet` | Raise or lower log detail | - |
+
+## Trends
+
+A single snapshot cannot answer the question the DORA metrics exist for: is delivery getting better or worse? `--compare-previous` runs the same analysis over the window immediately before this one and shows the movement.
+
+```bash
+uv run github-metrics my-org --months 1 --compare-previous
+```
+
+```
+Lead time for changes     16.4 h    ↑ 16.2 h   High
+Deployment frequency  4.43 / day   ↓ 1.43 /day  Elite
+Change failure rate       10.5 %     ↑ 4.8 pp   Elite
+Time to restore service    6.9 h     ↑ 5.9 h    High
+
+Compared with 26 May 2026 to 25 Jun 2026: 191 commits (-19), 16 pull requests (-4), 1 active developer (no change)
+```
+
+Improvements are green and regressions red, per metric — deploying more often is progress, taking longer to recover is not. It doubles the data fetched, since the earlier window has to be collected too.
+
+## Configuration
+
+Some settings describe an organization rather than a run: which workflow deploys each repository, which accounts are automation, how large a commit has to be before it is generated output. Put those in `.github-metrics.toml` next to the project instead of retyping them:
+
+```toml
+bulk_commit_lines = 10000
+exclude_users = ["cursoragent", "release-bot"]
+strict_deployments = false
+
+[deploy_workflows]
+default = "Deploy"
+api = "Release"
+web = "Publish"
+```
+
+Command-line flags always win over the file. Point at a different file with `--config FILE`; unknown settings are reported and ignored, and a malformed one stops the run rather than being silently half-applied.
+
+## Data handling
+
+**The cache is personal data.** `<org>_github_data_cache.json` holds raw API responses — logins, commit authorship, timestamps, pull request titles — for everyone active in the window. A three-month run over 35 repositories produced 68 MB of it. The CSV exports name individuals too.
+
+- Both are covered by `.gitignore`, but nothing stops you copying them elsewhere. Treat them like any other export of colleague data.
+- `--anonymize` covers the console and the CSVs, not the cache. That is deliberate: re-analysing cached data needs the real logins. Use `--no-cache` when you want nothing durable on disk.
+- Delete caches you are no longer using; there is no retention policy and the tool will never remove one for you.
+- Consider what you are measuring people for before you run it. See the note on lines changed under [Accuracy and limitations](#accuracy-and-limitations).
 
 ## Output
 
@@ -200,6 +248,7 @@ The layout keeps the analysis testable without a network:
 | `dora.py` | DORA performance bands |
 | `report.py` | Console tables and CSV export |
 | `cache.py` | Versioned on-disk cache and checkpoints |
+| `config.py` | Optional `.github-metrics.toml` settings |
 | `cli.py` | Argument handling and orchestration |
 
 Regenerate the README image after changing the console output:

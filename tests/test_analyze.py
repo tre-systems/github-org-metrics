@@ -661,3 +661,60 @@ class TestPerRepositoryWorkflows:
         )
 
         assert self.by_name(report)["api"].deployment_workflow == "ci"
+
+
+class TestExcludedUsers:
+    def data(self):
+        return raw_data(
+            repos=[repo("api")],
+            commits={
+                "api": [
+                    commit("a1", "alice", iso(2025, 2, 1)),
+                    commit("c1", "cursoragent", iso(2025, 2, 1)),
+                ]
+            },
+            commit_stats={
+                "api": {"a1": {"additions": 10}, "c1": {"additions": 20}},
+            },
+            pull_requests={"api": [pull(1, "cursoragent", iso(2025, 2, 1))]},
+            pr_reviews={
+                "api": {
+                    "1": [
+                        {
+                            "user": {"login": "cursoragent"},
+                            "submitted_at": iso(2025, 2, 2),
+                        }
+                    ]
+                }
+            },
+        )
+
+    def test_an_excluded_login_disappears_everywhere(self, options):
+        report = analyze(
+            self.data(), replace(options, exclude_users=frozenset({"cursoragent"}))
+        )
+
+        assert [dev.name for dev in report.developers] == ["alice"]
+
+    def test_matching_ignores_case(self, options):
+        report = analyze(
+            self.data(), replace(options, exclude_users=frozenset({"cursoragent"}))
+        )
+        upper = analyze(
+            raw_data(
+                repos=[repo("api")],
+                commits={"api": [commit("c1", "CursorAgent", iso(2025, 2, 1))]},
+                commit_stats={"api": {"c1": {"additions": 20}}},
+            ),
+            replace(options, exclude_users=frozenset({"cursoragent"})),
+        )
+
+        assert report.developers[0].name == "alice"
+        assert upper.developers == []
+
+    def test_their_commits_still_count_towards_the_repository(self, options):
+        report = analyze(
+            self.data(), replace(options, exclude_users=frozenset({"cursoragent"}))
+        )
+
+        assert report.repositories[0].commit_count == 2

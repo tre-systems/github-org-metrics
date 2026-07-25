@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -22,11 +23,13 @@ from rich.progress import (
 )
 
 from . import __version__, cache
+from . import config as config_module
 from .analyze import DEFAULT_BULK_COMMIT_LINES, AnalysisOptions, analyze
 from .client import AuthenticationError, GitHubClient, GitHubError
 from .collect import CollectionOptions, Collector
+from .config import DEFAULT_CONFIG_FILENAME, ConfigError
 from .dates import months_before, parse_github_date
-from .models import RawData
+from .models import RawData, Report
 from .report import export_csv, render
 
 logger = logging.getLogger("github_metrics")
@@ -75,6 +78,14 @@ the organization. A token is not needed when reading from the cache.
     exclusive.add_argument(
         "--days", type=_positive_int, help="Days to analyse, instead of --months"
     )
+    window.add_argument(
+        "--compare-previous",
+        action="store_true",
+        help=(
+            "Also analyse the window immediately before this one and show how "
+            "each metric moved (doubles the data fetched)"
+        ),
+    )
 
     scope = parser.add_argument_group("scope")
     scope.add_argument(
@@ -108,6 +119,7 @@ the organization. A token is not needed when reading from the cache.
     scope.add_argument(
         "--strict-deployments",
         action="store_true",
+        default=None,
         help=(
             "Count only deployment-shaped workflows, rather than falling back "
             "to a repository's CI workflow"
@@ -144,12 +156,18 @@ the organization. A token is not needed when reading from the cache.
     output.add_argument(
         "--bulk-commit-lines",
         type=int,
-        default=DEFAULT_BULK_COMMIT_LINES,
+        default=None,
         metavar="LINES",
         help=(
             "Exclude commits adding more than this many lines from developer "
             f"totals (default: {DEFAULT_BULK_COMMIT_LINES:,}; 0 counts everything)"
         ),
+    )
+    output.add_argument(
+        "--exclude-user",
+        action="append",
+        metavar="LOGIN",
+        help="Leave this account out entirely; repeatable",
     )
     output.add_argument(
         "--include-inactive",
@@ -170,6 +188,15 @@ the organization. A token is not needed when reading from the cache.
         "--no-cache", action="store_true", help="Do not write a cache file"
     )
 
+    parser.add_argument(
+        "--config",
+        type=Path,
+        metavar="FILE",
+        help=(
+            f"Settings file to read (default: {DEFAULT_CONFIG_FILENAME} in the "
+            "current directory, if present)"
+        ),
+    )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
@@ -192,15 +219,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     console = Console(record=args.export_svg is not None)
     _configure_logging(console, verbose=args.verbose, quiet=args.quiet)
 
+    try:
+        settings = _resolve_settings(args)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return 1
+
     until = datetime.now(UTC)
     since = (
         until - timedelta(days=args.days)
         if args.days
         else months_before(until, args.months or DEFAULT_MONTHS)
     )
+    # Comparing needs the preceding window of equal length fetched as well.
+    earliest = since - (until - since) if args.compare_previous else since
 
     try:
-        data = _load_or_collect(args, since, until, console)
+        data = _load_or_collect(args, earliest, until, console)
     except AuthenticationError as exc:
         logger.error("%s", exc)
         return 2
@@ -214,22 +249,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if data is None:
         return 1
 
-    _warn_on_window_mismatch(data, since)
+    _warn_on_window_mismatch(data, earliest)
 
-    default_workflow, workflows_by_repo = _parse_deploy_workflows(args.deploy_workflow)
+    def analyse(start: datetime, end: datetime) -> Report:
+        return analyze(data, replace(settings, since=start, until=end))
 
-    report = analyze(
-        data,
-        AnalysisOptions(
-            since=since,
-            until=until,
-            bulk_commit_lines=args.bulk_commit_lines,
-            include_inactive=args.include_inactive,
-            deploy_workflow=default_workflow,
-            deploy_workflow_by_repo=workflows_by_repo,
-            strict_deployments=args.strict_deployments,
-        ),
-    )
+    report = analyse(since, until)
+    if args.compare_previous:
+        report = replace(report, previous=analyse(earliest, since))
 
     render(report, console, anonymize=args.anonymize)
 
@@ -359,6 +386,52 @@ def _warn_on_window_mismatch(data: RawData, since: datetime) -> None:
             cached_since.date(),
             since.date(),
         )
+
+
+def _resolve_settings(args: argparse.Namespace) -> AnalysisOptions:
+    """Combine the configuration file with command-line flags.
+
+    Flags win wherever they were actually given; the file fills in the rest.
+    The window is set per analysis, so the dates here are placeholders.
+
+    Raises:
+        ConfigError: If a configuration file was requested but is unusable.
+    """
+    settings = config_module.load(args.config, search_from=Path.cwd())
+
+    flag_workflow, flag_workflows_by_repo = _parse_deploy_workflows(args.deploy_workflow)
+    workflows_by_repo = {
+        **settings.deploy_workflow_by_repo,
+        **flag_workflows_by_repo,
+    }
+    excluded = {*settings.exclude_users, *(args.exclude_user or [])}
+
+    placeholder = datetime.now(UTC)
+    return AnalysisOptions(
+        since=placeholder,
+        until=placeholder,
+        bulk_commit_lines=_first_set(
+            args.bulk_commit_lines,
+            settings.bulk_commit_lines,
+            DEFAULT_BULK_COMMIT_LINES,
+        ),
+        include_inactive=args.include_inactive,
+        deploy_workflow=flag_workflow or settings.deploy_workflow,
+        deploy_workflow_by_repo=workflows_by_repo,
+        strict_deployments=_first_set(
+            args.strict_deployments, settings.strict_deployments, False
+        ),
+        exclude_users=frozenset(login.lower() for login in excluded),
+    )
+
+
+def _first_set[T](*candidates: T | None) -> T:
+    """Return the first value that was actually configured."""
+    for candidate in candidates:
+        if candidate is not None:
+            return candidate
+    message = "the last candidate must not be None"
+    raise AssertionError(message)
 
 
 def _parse_deploy_workflows(

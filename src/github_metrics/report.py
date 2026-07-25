@@ -106,6 +106,10 @@ def render(report: Report, console: Console, *, anonymize: bool = False) -> None
 
     console.print()
     console.print(_dora_table(report))
+
+    if report.previous is not None:
+        console.print(_activity_change(report))
+
     console.print()
 
 
@@ -161,9 +165,13 @@ def _repository_table(repositories: Sequence[RepositoryMetrics]) -> Table:
 
 def _dora_table(report: Report) -> Table:
     summary = report.dora
+    previous = report.previous.dora if report.previous else None
+
     table = Table(title="DORA Metrics", title_justify="left", header_style="bold")
     table.add_column("Metric")
     table.add_column("Value", justify="right")
+    if previous is not None:
+        table.add_column("Change", justify="right")
     table.add_column("Rating")
     table.add_column("Basis", style="dim")
 
@@ -207,11 +215,107 @@ def _dora_table(report: Report) -> Table:
         ),
     ]
 
-    for metric, value, rating, basis in rows:
+    changes = _dora_changes(summary, previous)
+
+    for index, (metric, value, rating, basis) in enumerate(rows):
         style = RATING_STYLES.get(rating, "")
-        table.add_row(metric, value, f"[{style}]{rating}[/{style}]", basis)
+        cells = [metric, value]
+        if previous is not None:
+            cells.append(changes[index])
+        cells.extend([f"[{style}]{rating}[/{style}]", basis])
+        table.add_row(*cells)
 
     return table
+
+
+def _dora_changes(summary: DoraSummary, previous: DoraSummary | None) -> list[str]:
+    """Render each DORA metric's movement against the preceding window.
+
+    The rows are in the same order as the table's, and each knows which
+    direction counts as an improvement: deploying more often is progress,
+    while taking longer or failing more is not.
+    """
+    if previous is None:
+        return []
+
+    return [
+        _change(
+            summary.lead_time_mean if summary.lead_time_samples else None,
+            previous.lead_time_mean if previous.lead_time_samples else None,
+            unit="h",
+            lower_is_better=True,
+        ),
+        _change(
+            summary.deploys_per_day if summary.deploys_total else None,
+            previous.deploys_per_day if previous.deploys_total else None,
+            unit="/day",
+            lower_is_better=False,
+            precision=2,
+        ),
+        _change(
+            summary.change_failure_rate if summary.deploys_total else None,
+            previous.change_failure_rate if previous.deploys_total else None,
+            unit="pp",
+            lower_is_better=True,
+        ),
+        _change(
+            summary.recovery_time_mean if summary.recovery_time_samples else None,
+            previous.recovery_time_mean if previous.recovery_time_samples else None,
+            unit="h",
+            lower_is_better=True,
+        ),
+    ]
+
+
+def _change(
+    current: float | None,
+    previous: float | None,
+    *,
+    unit: str,
+    lower_is_better: bool,
+    precision: int = 1,
+) -> str:
+    """Format one metric's movement, coloured by whether it is an improvement."""
+    if current is None or previous is None:
+        return "[dim]-[/dim]"
+
+    difference = current - previous
+    if abs(difference) < 10**-precision / 2:
+        return "[dim]no change[/dim]"
+
+    improved = (difference < 0) if lower_is_better else (difference > 0)
+    arrow = "↓" if difference < 0 else "↑"
+    style = "green" if improved else "red"
+    return f"[{style}]{arrow} {abs(difference):,.{precision}f} {unit}[/{style}]"
+
+
+def _activity_change(report: Report) -> str:
+    """Summarise how overall activity moved against the preceding window."""
+    previous = report.previous
+    if previous is None:  # pragma: no cover - guarded by the caller
+        return ""
+
+    parts = [
+        _counted_change("commit", report.total_commits, previous.total_commits),
+        _counted_change(
+            "pull request", report.total_pull_requests, previous.total_pull_requests
+        ),
+        _counted_change(
+            "active developer", len(report.developers), len(previous.developers)
+        ),
+    ]
+    window = f"{previous.since:%d %b %Y} to {previous.until:%d %b %Y}"
+    return f"\n[dim]Compared with {window}:[/dim] " + ", ".join(parts)
+
+
+def _counted_change(noun: str, current: int, previous: int) -> str:
+    """Render a whole-number movement, e.g. "1,204 commits (+83)"."""
+    counted = _count(current, noun)
+    difference = current - previous
+    if difference == 0:
+        return f"{counted} [dim](no change)[/dim]"
+    style = "green" if difference > 0 else "red"
+    return f"{counted} [{style}]({difference:+,})[/{style}]"
 
 
 def _workflow_cell(repo: RepositoryMetrics) -> str:

@@ -186,6 +186,18 @@ class Report:
     dora: DoraSummary
     bulk_commits: BulkCommits
     has_pr_details: bool
+    previous: Report | None = None
+    """The same analysis over the preceding window, when comparing."""
+
+    @property
+    def total_commits(self) -> int:
+        """Commits across every active repository in the window."""
+        return sum(repo.commit_count for repo in self.repositories)
+
+    @property
+    def total_pull_requests(self) -> int:
+        """Pull requests across every active repository in the window."""
+        return sum(repo.pr_count for repo in self.repositories)
 
     @property
     def window_days(self) -> float:

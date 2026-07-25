@@ -335,3 +335,111 @@ class TestDeployWorkflowParsing:
         main(["acme", "--use-cache", "--output-dir", str(ci_only_org)])
 
         assert "none found" not in capsys.readouterr().out
+
+
+class TestConfigFile:
+    def write_config(self, directory, body):
+        (directory / ".github-metrics.toml").write_text(body, encoding="utf-8")
+
+    def test_settings_are_read_from_the_working_directory(
+        self, ci_only_org, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(ci_only_org)
+        self.write_config(ci_only_org, "strict_deployments = true")
+
+        assert main(["acme", "--use-cache", "--output-dir", str(ci_only_org)]) == 0
+        assert "none found" in capsys.readouterr().out
+
+    def test_a_flag_overrides_the_file(self, cached_org, monkeypatch, capsys):
+        monkeypatch.chdir(cached_org)
+        self.write_config(cached_org, 'exclude_users = ["alice"]')
+
+        main(
+            [
+                "acme",
+                "--use-cache",
+                "--include-inactive",
+                "--output-dir",
+                str(cached_org),
+            ]
+        )
+
+        assert "alice" not in capsys.readouterr().out
+
+    def test_excluded_users_from_the_file_are_applied(
+        self, cached_org, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(cached_org)
+        self.write_config(cached_org, 'exclude_users = ["ALICE"]')
+
+        main(["acme", "--use-cache", "--output-dir", str(cached_org)])
+
+        assert "alice" not in capsys.readouterr().out
+
+    def test_exclude_user_flag_works_without_a_file(self, cached_org, capsys):
+        main(
+            [
+                "acme",
+                "--use-cache",
+                "--exclude-user",
+                "alice",
+                "--output-dir",
+                str(cached_org),
+            ]
+        )
+
+        assert "alice" not in capsys.readouterr().out
+
+    def test_an_unusable_file_stops_the_run(self, cached_org, tmp_path, caplog):
+        broken = tmp_path / "broken.toml"
+        broken.write_text("bulk_commit_lines = 'lots'")
+
+        code = main(
+            [
+                "acme",
+                "--use-cache",
+                "--config",
+                str(broken),
+                "--output-dir",
+                str(cached_org),
+            ]
+        )
+
+        assert code == 1
+        assert "must be a number" in caplog.text
+
+    def test_a_missing_named_file_stops_the_run(self, cached_org, tmp_path, caplog):
+        code = main(
+            [
+                "acme",
+                "--use-cache",
+                "--config",
+                str(tmp_path / "absent.toml"),
+                "--output-dir",
+                str(cached_org),
+            ]
+        )
+
+        assert code == 1
+        assert "No configuration file" in caplog.text
+
+
+class TestComparePrevious:
+    def test_fetches_and_reports_the_preceding_window(self, cached_org, capsys):
+        code = main(
+            [
+                "acme",
+                "--use-cache",
+                "--compare-previous",
+                "--output-dir",
+                str(cached_org),
+            ]
+        )
+
+        assert code == 0
+        assert "Compared with" in capsys.readouterr().out
+
+    def test_is_off_by_default(self, cached_org, capsys):
+        main(["acme", "--use-cache", "--output-dir", str(cached_org)])
+
+        assert "Compared with" not in capsys.readouterr().out

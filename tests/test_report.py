@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 
 from rich.console import Console
 
@@ -187,3 +188,78 @@ class TestDeploymentWorkflowVisibility:
 
         assert rows[0][8] == "Deploy Workflow"
         assert rows[1][8] == "deploy"
+
+
+class TestComparison:
+    def render_to_text(self, report):
+        console = Console(record=True, width=140, force_terminal=False)
+        render(report, console)
+        return console.export_text()
+
+    def compared(self, options, previous_overrides=None):
+        current = build_report(options)
+        previous = build_report(options, **(previous_overrides or {}))
+        return replace(current, previous=previous)
+
+    def test_nothing_is_compared_without_a_previous_window(self, options):
+        text = self.render_to_text(build_report(options))
+
+        assert "Compared with" not in text
+        assert "↑" not in text
+        assert "↓" not in text
+
+    def test_shows_how_each_metric_moved(self, options):
+        report = self.compared(
+            options,
+            {
+                "pull_requests": {
+                    "api": [pull(1, "alice", iso(2025, 2, 1), merged=iso(2025, 2, 3))]
+                }
+            },
+        )
+
+        text = self.render_to_text(report)
+
+        # Lead time fell from 48 h in the previous window to 24 h in this one.
+        assert "↓ 24.0 h" in text
+
+    def test_identical_windows_report_no_change(self, options):
+        text = self.render_to_text(self.compared(options))
+
+        assert "no change" in text
+
+    def test_summarises_activity_against_the_previous_window(self, options):
+        report = self.compared(options)
+
+        text = self.render_to_text(report)
+
+        assert "Compared with" in text
+        assert "2 commits" in text
+
+    def test_counts_are_singular_when_there_is_one(self, options):
+        report = self.compared(options)
+
+        assert "1 active developer " in self.render_to_text(report)
+
+    def test_missing_data_on_either_side_shows_no_delta(self, options):
+        current = build_report(options)
+        empty = analyze(raw_data(), options)
+
+        text = self.render_to_text(replace(current, previous=empty))
+
+        assert "Compared with" in text
+        assert "↑" not in text
+        assert "↓" not in text
+
+    def test_a_worse_metric_is_still_reported(self, options):
+        """Regressions must show up as clearly as improvements."""
+        worse = build_report(
+            options,
+            pull_requests={
+                "api": [pull(1, "alice", iso(2025, 2, 1), merged=iso(2025, 2, 1, 18))]
+            },
+        )
+        report = replace(build_report(options), previous=worse)
+
+        # Lead time rose from 6 h to 24 h.
+        assert "↑ 18.0 h" in self.render_to_text(report)
