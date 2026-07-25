@@ -6,7 +6,7 @@ import csv
 
 from rich.console import Console
 
-from github_metrics.analyze import AnalysisOptions, analyze
+from github_metrics.analyze import analyze
 from github_metrics.report import (
     DEVELOPER_HEADERS,
     anonymize_name,
@@ -17,27 +17,27 @@ from tests.conftest import UNTIL, commit, iso, pull, raw_data, repo, run
 
 
 def build_report(options, **overrides):
-    data = raw_data(
-        repos=[repo("api")],
-        commits={
+    payload = {
+        "repos": [repo("api")],
+        "commits": {
             "api": [
                 commit("a1", "alice", iso(2025, 2, 1)),
                 commit("b1", "bulk", iso(2025, 2, 1)),
             ]
         },
-        commit_stats={
+        "commit_stats": {
             "api": {
                 "a1": {"additions": 120, "deletions": 30},
                 "b1": {"additions": 500_000, "deletions": 0},
             }
         },
-        pull_requests={
+        "pull_requests": {
             "api": [pull(1, "alice", iso(2025, 2, 1), merged=iso(2025, 2, 2))]
         },
-        workflow_runs={"api": [run("Deploy", iso(2025, 2, 5), "success")]},
-        **overrides,
-    )
-    return analyze(data, options)
+        "workflow_runs": {"api": [run("Deploy", iso(2025, 2, 5), "success")]},
+    }
+    payload.update(overrides)
+    return analyze(raw_data(**payload), options)
 
 
 def read_csv(path):
@@ -46,13 +46,12 @@ def read_csv(path):
 
 
 class TestCsvExport:
-    def test_writes_developer_repository_and_outlier_files(self, options, tmp_path):
+    def test_writes_developer_and_repository_files(self, options, tmp_path):
         paths = export_csv(build_report(options), tmp_path)
 
         assert [path.name for path in paths] == [
             "acme_github_developer_metrics.csv",
             "acme_github_repository_metrics.csv",
-            "acme_github_outliers.csv",
         ]
 
     def test_developer_rows_carry_the_documented_columns(self, options, tmp_path):
@@ -63,12 +62,8 @@ class TestCsvExport:
         assert rows[0] == list(DEVELOPER_HEADERS)
         assert rows[1] == ["alice", "1", "120", "30", "1", "0", "0", "api"]
 
-    def test_skips_the_outlier_file_when_there_are_none(self, options, tmp_path):
-        report = build_report(
-            AnalysisOptions(**{**vars(options), "outlier_threshold": 0})
-        )
-
-        paths = export_csv(report, tmp_path)
+    def test_never_writes_an_outliers_file(self, options, tmp_path):
+        paths = export_csv(build_report(options), tmp_path)
 
         assert not any("outliers" in path.name for path in paths)
 
@@ -121,11 +116,20 @@ class TestConsoleRendering:
         assert "DORA Metrics" in text
         assert "alice" in text
 
-    def test_separates_outliers(self, options):
+    def test_says_what_it_excluded(self, options):
         text = self.render_to_text(build_report(options))
 
-        assert "Outliers" in text
+        assert "1 bulk commit" in text
         assert "500,000" in text
+
+    def test_says_nothing_when_no_commits_were_excluded(self, options):
+        report = build_report(
+            options,
+            commit_stats={"api": {"a1": {"additions": 120, "deletions": 30}}},
+            commits={"api": [commit("a1", "alice", iso(2025, 2, 1))]},
+        )
+
+        assert "bulk" not in self.render_to_text(report)
 
     def test_anonymises_on_request(self, options):
         text = self.render_to_text(build_report(options), anonymize=True)

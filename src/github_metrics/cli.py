@@ -22,7 +22,7 @@ from rich.progress import (
 )
 
 from . import __version__, cache
-from .analyze import DEFAULT_OUTLIER_THRESHOLD, AnalysisOptions, analyze
+from .analyze import DEFAULT_BULK_COMMIT_LINES, AnalysisOptions, analyze
 from .client import AuthenticationError, GitHubClient, GitHubError
 from .collect import CollectionOptions, Collector
 from .dates import months_before, parse_github_date
@@ -132,13 +132,13 @@ the organization. A token is not needed when reading from the cache.
         help="Replace developer logins with stable pseudonyms everywhere",
     )
     output.add_argument(
-        "--outlier-threshold",
+        "--bulk-commit-lines",
         type=int,
-        default=DEFAULT_OUTLIER_THRESHOLD,
+        default=DEFAULT_BULK_COMMIT_LINES,
         metavar="LINES",
         help=(
-            "Report developers above this many added lines separately "
-            f"(default: {DEFAULT_OUTLIER_THRESHOLD:,}; 0 disables)"
+            "Exclude commits adding more than this many lines from developer "
+            f"totals (default: {DEFAULT_BULK_COMMIT_LINES:,}; 0 counts everything)"
         ),
     )
     output.add_argument(
@@ -211,7 +211,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         AnalysisOptions(
             since=since,
             until=until,
-            outlier_threshold=args.outlier_threshold,
+            bulk_commit_lines=args.bulk_commit_lines,
             include_inactive=args.include_inactive,
             deploy_workflow=args.deploy_workflow,
         ),

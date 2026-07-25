@@ -16,7 +16,9 @@ A command-line tool that measures how a GitHub organization actually delivers so
 
 Commits, lines added and deleted, pull requests opened, reviews given, and review comments — per person, over the chosen window.
 
-Bot accounts are excluded. So are contributors who changed no lines, unless you pass `--include-inactive` (useful when you care about reviewers). Anyone above 100,000 added lines is moved to a separate outliers table, because a single vendored dependency or generated file otherwise dominates every other row; adjust with `--outlier-threshold`.
+Bot accounts are excluded. So are contributors who changed no lines, unless you pass `--include-inactive` (useful when you care about reviewers).
+
+Line counts skip individual commits above 10,000 added lines, and the report says how many were dropped. Those commits are lockfiles, vendored dependencies, and generated output: in one real organization, 10 commits out of 3,921 accounted for 58% of every line added, against a median commit of 85 lines. The commits still count towards commit totals — it is only their line counts that are set aside. Tune with `--bulk-commit-lines`, or pass `0` to count everything.
 
 ### Repository activity
 
@@ -116,7 +118,7 @@ uv run github-metrics my-org --use-cache --anonymize
 | `--no-csv` | Skip writing CSV files | off |
 | `--export-svg FILE` | Also save the console report as an SVG image | - |
 | `--anonymize` | Replace logins with stable pseudonyms everywhere | off |
-| `--outlier-threshold N` | Added-line count above which a contributor is listed separately (0 disables) | 100,000 |
+| `--bulk-commit-lines N` | Exclude commits adding more than this many lines from developer totals (0 counts everything) | 10,000 |
 | `--include-inactive` | Include contributors who changed no lines | off |
 | `--use-cache` | Analyse cached data instead of calling the API | off |
 | `--update-cache` | Fetch fresh data and rewrite the cache | off |
@@ -125,11 +127,9 @@ uv run github-metrics my-org --use-cache --anonymize
 
 ## Output
 
-Three CSV files are written alongside the console report.
+Two CSV files are written alongside the console report.
 
 **`<org>_github_developer_metrics.csv`** — Developer, Commits, Lines Added, Lines Deleted, PRs Opened, PRs Reviewed, PR Comments, Repositories.
-
-**`<org>_github_outliers.csv`** — the same columns, for contributors above the outlier threshold. Only written when there are any.
 
 **`<org>_github_repository_metrics.csv`** — Repository, Commits, PRs, Lead Time (h), Deploys, Fail %, MTTR (h), Deploy (m), Deploy Workflow, Created, Updated, Language, Branches, Contributors.
 
@@ -158,8 +158,8 @@ Long runs are also resumable. Progress is checkpointed to the cache every ten re
 ## Accuracy and limitations
 
 - **Deployments are inferred, not observed.** GitHub has no universal notion of a deployment, so the busiest deployment-shaped workflow (`deploy`, `release`, `publish`, else `ci`/`cd`/`build`/`test`) on the default branch stands in for one. The report names the workflow it counted per repository, so you can check the guess; override it with `--deploy-workflow NAME`. A repository that deploys outside GitHub Actions reports no deployments.
-- **Lead time excludes branches older than 90 days.** They are real, but they are not what the metric is trying to describe.
-- **Line counts come from GitHub's own commit stats** and include whatever was committed — generated files, vendored dependencies, and large reformats all count. That is what the outliers table is for.
+- **Lead time excludes branches older than 90 days**, and time-to-restore excludes gaps longer than 7 days. Both are real events, but a branch abandoned for a quarter is not a lead time, and a pipeline left red for a fortnight is an abandoned workflow rather than a fortnight-long outage. Failures beyond the cap are still counted in the change failure rate, and reported alongside the recovery figure.
+- **Line counts come from GitHub's own commit stats.** Commits above `--bulk-commit-lines` are excluded to keep generated and vendored files from swamping the totals, but everything below it still counts, including large reformats.
 - **Commits are counted on the default branch only**, which is what the commits endpoint returns.
 - **Lines changed is not productivity.** Neither is commit count. These numbers are useful for seeing where activity and review load are concentrated; they make poor performance targets, and they will be gamed if used as such.
 

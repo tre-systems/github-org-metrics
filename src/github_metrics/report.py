@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import dora
-from .models import DeveloperMetrics, Report, RepositoryMetrics
+from .models import DeveloperMetrics, DoraSummary, Report, RepositoryMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -75,23 +75,21 @@ def render(report: Report, console: Console, *, anonymize: bool = False) -> None
         f"{report.since:%d %b %Y} to {report.until:%d %b %Y}"
     )
 
-    if not report.developers and not report.outliers:
-        console.print("\n[yellow]No developer activity found in this window.[/yellow]")
-    else:
+    if report.developers:
         console.print()
         console.print(
             _developer_table("Developer Activity", report, report.developers, anonymize)
         )
+    else:
+        console.print("\n[yellow]No developer activity found in this window.[/yellow]")
 
-    if report.outliers:
-        console.print()
+    bulk = report.bulk_commits
+    if bulk.any_excluded:
         console.print(
-            _developer_table(
-                "Outliers (likely generated or vendored files)",
-                report,
-                report.outliers,
-                anonymize,
-            )
+            f"\n[dim]Line counts exclude {bulk.count:,} bulk "
+            f"{'commit' if bulk.count == 1 else 'commits'} "
+            f"({bulk.lines_added:,} added lines over {bulk.threshold:,} per commit) "
+            f"— generated or vendored files.[/dim]"
         )
 
     console.print()
@@ -200,7 +198,7 @@ def _dora_table(report: Report) -> Table:
             dora.rate_recovery_time(
                 summary.recovery_time_mean, summary.recovery_time_samples
             ),
-            f"{_count(summary.recovery_time_samples, 'recovery', 'recoveries')} observed",
+            _recovery_basis(summary),
         ),
     ]
 
@@ -209,6 +207,17 @@ def _dora_table(report: Report) -> Table:
         table.add_row(metric, value, f"[{style}]{rating}[/{style}]", basis)
 
     return table
+
+
+def _recovery_basis(summary: DoraSummary) -> str:
+    """Explain what the time-to-restore figure was computed from."""
+    observed = _count(summary.recovery_time_samples, "recovery", "recoveries")
+    if not summary.abandoned_failures:
+        return f"{observed} observed"
+    return (
+        f"{observed} observed; "
+        f"{summary.abandoned_failures:,} left unresolved or too long to count"
+    )
 
 
 def _count(quantity: int, singular: str, plural: str | None = None) -> str:
@@ -257,15 +266,6 @@ def export_csv(
             _repository_rows(report.repositories),
         )
     )
-    if report.outliers:
-        written.append(
-            _write_csv(
-                output_dir / f"{prefix}_github_outliers.csv",
-                DEVELOPER_HEADERS,
-                _developer_rows(report.outliers, report, anonymize),
-            )
-        )
-
     return written
 
 

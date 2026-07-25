@@ -41,7 +41,9 @@ DEVELOPERS = [
     ("bea-lindqvist", 58, 1_152, 314, 20, 98, 115),
     ("quinn-abara", 14, 1_250, 134, 16, 46, 7),
     ("noor-haddad", 9, 780, 612, 6, 4, 3),
-    ("vendored-deps", 40, 224_764, 207_602, 12, 17, 14),
+    # A handful of enormous commits: lockfiles and generated output, which the
+    # bulk-commit filter sets aside.
+    ("vendored-deps", 6, 1_500_000, 1_400_000, 2, 1, 0),
 ]
 
 REPOSITORIES = [

@@ -17,6 +17,7 @@ from typing import Any
 
 from .dates import format_date_for_display, parse_github_date
 from .models import (
+    BulkCommits,
     DeveloperMetrics,
     DoraSummary,
     RawData,
@@ -28,14 +29,20 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["AnalysisOptions", "analyze"]
 
-#: Developers above this many added lines are reported separately; such totals
-#: almost always mean vendored dependencies or generated files, and they distort
-#: every other row in the table.
-DEFAULT_OUTLIER_THRESHOLD = 100_000
+#: Commits adding more than this many lines are left out of developer line
+#: counts. A typical commit is under a hundred lines; ones this size are
+#: lockfiles, vendored dependencies, generated output, or bulk imports, and a
+#: handful of them can outweigh every other commit in an organization.
+DEFAULT_BULK_COMMIT_LINES = 10_000
 
 #: Pull requests open longer than this are excluded from lead time. Long-lived
 #: branches are real, but they are not what lead time is trying to measure.
 MAX_LEAD_TIME_HOURS = 90 * 24
+
+#: Recovery gaps longer than this are excluded from time-to-restore. A pipeline
+#: left red for a fortnight is an abandoned workflow, not a fortnight-long
+#: outage, and one such gap otherwise dominates the mean.
+MAX_RECOVERY_HOURS = 7 * 24
 
 #: Workflow names suggesting an actual deployment, preferred over plain CI.
 DEPLOY_KEYWORDS = ("deploy", "release", "publish")
@@ -50,9 +57,12 @@ class AnalysisOptions:
 
     since: datetime
     until: datetime
-    outlier_threshold: int = DEFAULT_OUTLIER_THRESHOLD
+    bulk_commit_lines: int = DEFAULT_BULK_COMMIT_LINES
+    """Skip commits adding more than this many lines; 0 counts everything."""
+
     include_inactive: bool = False
     max_lead_time_hours: float = MAX_LEAD_TIME_HOURS
+    max_recovery_hours: float = MAX_RECOVERY_HOURS
     deploy_workflow: str | None = None
     """Count this workflow as the deployment, instead of inferring one."""
 
@@ -69,26 +79,29 @@ def analyze(data: RawData, options: AnalysisOptions) -> Report:
     """
     developers: dict[str, DeveloperMetrics] = {}
     repositories: list[RepositoryMetrics] = []
+    bulk = _BulkTally(options.bulk_commit_lines)
 
     for repo in data.get("repos", []):
         name = repo.get("name")
         if not name:
             continue
-        repositories.append(_analyze_repository(data, repo, name, developers, options))
+        repositories.append(
+            _analyze_repository(data, repo, name, developers, options, bulk)
+        )
 
     active = [repo for repo in repositories if repo.is_active]
     active.sort(key=lambda repo: (-repo.commit_count, -repo.pr_count, repo.name))
 
-    ranked, outliers = _rank_developers(developers.values(), options)
+    ranked = _rank_developers(developers.values(), options)
 
     return Report(
         org=data.get("org", ""),
         since=options.since,
         until=options.until,
         developers=ranked,
-        outliers=outliers,
         repositories=active,
         dora=_summarise_dora(active, options),
+        bulk_commits=bulk.result(),
         has_pr_details=bool(data.get("fetch_pr_details", False)),
     )
 
@@ -104,6 +117,7 @@ def _analyze_repository(
     name: str,
     developers: dict[str, DeveloperMetrics],
     options: AnalysisOptions,
+    bulk: _BulkTally,
 ) -> RepositoryMetrics:
     metrics = RepositoryMetrics(
         name=name,
@@ -116,7 +130,7 @@ def _analyze_repository(
         contributor_count=data.get("contributor_counts", {}).get(name, 0),
     )
 
-    _apply_commits(data, name, metrics, developers, options)
+    _apply_commits(data, name, metrics, developers, options, bulk)
     _apply_pull_requests(data, name, metrics, developers, options)
     _apply_reviews_and_comments(data, name, developers, options)
     _apply_workflow_runs(data, repo, name, metrics, options)
@@ -129,6 +143,7 @@ def _apply_commits(
     metrics: RepositoryMetrics,
     developers: dict[str, DeveloperMetrics],
     options: AnalysisOptions,
+    bulk: _BulkTally,
 ) -> None:
     stats_by_sha = data.get("commit_stats", {}).get(repo, {})
 
@@ -149,9 +164,15 @@ def _apply_commits(
         developer.repositories[repo] += 1
 
         stats = stats_by_sha.get(commit.get("sha", ""))
-        if stats:
-            developer.lines_added += int(stats.get("additions", 0) or 0)
-            developer.lines_deleted += int(stats.get("deletions", 0) or 0)
+        if not stats:
+            continue
+
+        additions = int(stats.get("additions", 0) or 0)
+        if bulk.is_bulk(additions):
+            continue
+
+        developer.lines_added += additions
+        developer.lines_deleted += int(stats.get("deletions", 0) or 0)
 
 
 def _apply_pull_requests(
@@ -269,10 +290,11 @@ def _apply_workflow_runs(
         )
 
         if failure_started_at is not None:
-            _append_if_positive(
-                metrics.recovery_times,
-                (finished - failure_started_at).total_seconds() / 3600,
-            )
+            recovery = (finished - failure_started_at).total_seconds() / 3600
+            if 0 <= recovery <= options.max_recovery_hours:
+                metrics.recovery_times.append(recovery)
+            else:
+                metrics.abandoned_failures += 1
             failure_started_at = None
 
 
@@ -378,6 +400,7 @@ def _summarise_dora(
         change_failure_rate=(failures / deploys * 100) if deploys else 0.0,
         recovery_time_mean=_mean(recovery_times),
         recovery_time_samples=len(recovery_times),
+        abandoned_failures=sum(repo.abandoned_failures for repo in repositories),
         deployment_duration_mean=_mean(durations),
     )
 
@@ -390,21 +413,40 @@ def _summarise_dora(
 def _rank_developers(
     developers: Iterable[DeveloperMetrics],
     options: AnalysisOptions,
-) -> tuple[list[DeveloperMetrics], list[DeveloperMetrics]]:
-    """Sort developers and split out implausibly large contributions."""
+) -> list[DeveloperMetrics]:
+    """Sort developers, dropping those who changed no code."""
     selected = [
         developer
         for developer in developers
         if options.include_inactive or developer.touched_code
     ]
     selected.sort(key=lambda dev: (-dev.lines_added, -dev.commits, dev.name))
+    return selected
 
-    if options.outlier_threshold <= 0:
-        return selected, []
 
-    ranked = [d for d in selected if d.lines_added <= options.outlier_threshold]
-    outliers = [d for d in selected if d.lines_added > options.outlier_threshold]
-    return ranked, outliers
+class _BulkTally:
+    """Counts the commits excluded from line totals for being oversized."""
+
+    def __init__(self, threshold: int) -> None:
+        self.threshold = threshold
+        self.count = 0
+        self.lines_added = 0
+
+    def is_bulk(self, additions: int) -> bool:
+        """Whether a commit is too large to count, recording it if so."""
+        if self.threshold <= 0 or additions <= self.threshold:
+            return False
+        self.count += 1
+        self.lines_added += additions
+        return True
+
+    def result(self) -> BulkCommits:
+        """The tally so far."""
+        return BulkCommits(
+            count=self.count,
+            lines_added=self.lines_added,
+            threshold=max(self.threshold, 0),
+        )
 
 
 def _developer(developers: dict[str, DeveloperMetrics], login: str) -> DeveloperMetrics:

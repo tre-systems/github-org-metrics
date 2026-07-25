@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, TypedDict
 
 __all__ = [
+    "BulkCommits",
     "DeveloperMetrics",
     "DoraRating",
     "DoraSummary",
@@ -88,6 +89,9 @@ class RepositoryMetrics:
     deployment_failures: int = 0
     deployment_durations: list[float] = field(default_factory=list)
     recovery_times: list[float] = field(default_factory=list)
+    abandoned_failures: int = 0
+    """Failures whose recovery took longer than the cap, or never came."""
+
     lead_times: list[float] = field(default_factory=list)
 
     @property
@@ -119,6 +123,20 @@ class RepositoryMetrics:
 
 
 @dataclass(frozen=True)
+class BulkCommits:
+    """Commits left out of developer line counts for being implausibly large."""
+
+    count: int = 0
+    lines_added: int = 0
+    threshold: int = 0
+
+    @property
+    def any_excluded(self) -> bool:
+        """Whether anything was actually excluded."""
+        return self.count > 0
+
+
+@dataclass(frozen=True)
 class DoraRating:
     """A DORA performance band with the threshold that produced it."""
 
@@ -138,6 +156,7 @@ class DoraSummary:
     change_failure_rate: float
     recovery_time_mean: float
     recovery_time_samples: int
+    abandoned_failures: int
     deployment_duration_mean: float
 
 
@@ -149,9 +168,9 @@ class Report:
     since: datetime
     until: datetime
     developers: list[DeveloperMetrics]
-    outliers: list[DeveloperMetrics]
     repositories: list[RepositoryMetrics]
     dora: DoraSummary
+    bulk_commits: BulkCommits
     has_pr_details: bool
 
     @property
