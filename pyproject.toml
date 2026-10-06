@@ -77,6 +77,7 @@ select = [
 ignore = [
     "ANN401",  # Any is the honest type for decoded JSON
     "PLR0913", # metric functions legitimately take several inputs
+    "PLR0917", # the same metric inputs are intentionally positional
     "TRY003",  # short messages inline are clearer than exception subclasses
     "TRY400",  # CLI errors are reported to users, not dumped as tracebacks
 ]
