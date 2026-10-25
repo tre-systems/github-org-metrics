@@ -17,7 +17,7 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Typing :: Typed",
 ]
-dependencies = ["requests>=2.31.0", "rich>=13.7.0"]
+dependencies = ["certifi>=2026.10.19", "requests>=2.31.0", "rich>=13.7.0"]
 
 [project.urls]
 Homepage = "https://github.com/tre-systems/github-org-metrics"
